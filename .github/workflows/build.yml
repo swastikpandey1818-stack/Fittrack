@@ -1,0 +1,29 @@
+name: Build APK
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build
+        run: |
+          [ -d android ] || flutter create --platforms=android --project-name fittrack --org com.fittrack .
+          rm -rf test
+          sed -i 's/android:label="[^"]*"/android:label="FitTrack"/' android/app/src/main/AndroidManifest.xml
+          flutter pub get
+          flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fittrack-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
