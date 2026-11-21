@@ -9,6 +9,11 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    show FlutterLocalNotificationsPlugin, InitializationSettings, AndroidInitializationSettings, AndroidFlutterLocalNotificationsPlugin, NotificationDetails, AndroidNotificationDetails, Importance, Priority, AndroidScheduleMode, DateTimeComponents;
+import 'package:google_mobile_ads/google_mobile_ads.dart' show MobileAds, InterstitialAd, InterstitialAdLoadCallback, AdRequest, FullScreenContentCallback;
+import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 
 // ---------- theme / palette ----------
 class P {
@@ -346,6 +351,8 @@ void main() async {
   await DB.init();
   await DB.d.insert('logins', {'day': dk(DateTime.now())}, conflictAlgorithm: ConflictAlgorithm.ignore);
   await loadTheme();
+  unawaited(Remind.init());
+  unawaited(Ads.init());
   runApp(const App());
 }
 
@@ -517,59 +524,712 @@ Future<String?> ask(BuildContext c, String t, {String hint = '', bool numeric = 
   );
 }
 
-Future<List<String>?> askItem(BuildContext c) {
-  final n = TextEditingController(), s = TextEditingController(text: '3'), r = TextEditingController(text: '12');
-  var m = 'Other', timed = false, touched = false;
-  return showDialog<List<String>>(
-    context: c,
-    builder: (d) => StatefulBuilder(
-      builder: (d, set) => AlertDialog(
-        backgroundColor: P.card,
-        title: const Text('Add exercise'),
-        content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(
-              controller: n,
-              autofocus: true,
-              decoration: const InputDecoration(labelText: 'Exercise name'),
-              onChanged: (v) {
-                if (!touched) {
-                  set(() {
-                    timed = timedName(v);
-                    r.text = timed ? '45' : '12';
-                  });
-                }
-              },
-            ),
-            TextField(controller: s, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sets')),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Timed hold (plank, wall sit…)'),
-              value: timed,
-              onChanged: (v) => set(() {
-                touched = true;
-                timed = v;
-                r.text = v ? '45' : '12';
-              }),
-            ),
-            TextField(controller: r, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: timed ? 'Seconds per set' : 'Reps per set')),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              value: m,
-              dropdownColor: P.card,
-              decoration: const InputDecoration(labelText: 'Muscle (Other = auto-detect)'),
-              items: [for (final x in muscles) DropdownMenuItem(value: x, child: Text(x))],
-              onChanged: (v) => set(() => m = v ?? 'Other'),
-            ),
-          ]),
+// ---------- ads (test ids: replace with your own AdMob ids before a public release) ----------
+const adUnitId = 'ca-app-pub-3940256099942544/1033173712';
+const noAdsCode = 'fittrack111';
+
+class Ads {
+  static InterstitialAd? ad;
+  static bool loading = false;
+
+  static Future<void> init() async {
+    try {
+      await MobileAds.instance.initialize();
+      load();
+    } catch (_) {}
+  }
+
+  static void load() {
+    if (loading || ad != null) return;
+    loading = true;
+    try {
+      InterstitialAd.load(
+        adUnitId: adUnitId,
+        request: const AdRequest(),
+        adLoadCallback: InterstitialAdLoadCallback(
+          onAdLoaded: (a) {
+            ad = a;
+            loading = false;
+          },
+          onAdFailedToLoad: (e) {
+            loading = false;
+          },
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(d, [n.text.trim(), s.text, r.text, m == 'Other' ? guess(n.text) : m, timed ? 'time' : 'reps']), child: const Text('Add')),
+      );
+    } catch (_) {
+      loading = false;
+    }
+  }
+
+  static Future<bool> enabled() async => (await DB.kv('noads')) != '1';
+
+  static Future<void> maybeShow() async {
+    try {
+      if (!await enabled()) return;
+      final a = ad;
+      if (a == null) {
+        load();
+        return;
+      }
+      ad = null;
+      a.fullScreenContentCallback = FullScreenContentCallback(
+        onAdDismissedFullScreenContent: (x) {
+          x.dispose();
+          load();
+        },
+        onAdFailedToShowFullScreenContent: (x, e) {
+          x.dispose();
+          load();
+        },
+      );
+      await a.show();
+    } catch (_) {}
+  }
+}
+
+// ---------- reminders ----------
+final notif = FlutterLocalNotificationsPlugin();
+
+class Remind {
+  static bool ready = false;
+
+  static Future<void> init() async {
+    try {
+      tzdata.initializeTimeZones();
+      await notif.initialize(const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
+      ready = true;
+      await reschedule();
+    } catch (_) {}
+  }
+
+  static Future<bool> ask() async {
+    try {
+      final a = notif.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      return (await a?.requestNotificationsPermission()) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> reschedule() async {
+    if (!ready) return;
+    try {
+      await notif.cancelAll();
+      if (await DB.kv('rem_on') != '1') return;
+      final tm = ((await DB.kv('rem_time')) ?? '18:00').split(':');
+      final h = int.tryParse(tm[0]) ?? 18;
+      final m = int.tryParse(tm.length > 1 ? tm[1] : '0') ?? 0;
+      final days = ((await DB.kv('rem_days')) ?? '1,2,3,4,5,6,7').split(',').map(int.tryParse).whereType<int>().toList();
+      final now = DateTime.now();
+      for (final d in days) {
+        var t = DateTime(now.year, now.month, now.day, h, m);
+        while (t.weekday != d || !t.isAfter(now)) {
+          t = t.add(const Duration(days: 1));
+        }
+        await notif.zonedSchedule(
+          d,
+          'Time to train 💪',
+          'Your workout is waiting. Warm up and get moving.',
+          tz.TZDateTime.from(t, tz.UTC),
+          const NotificationDetails(android: AndroidNotificationDetails('fittrack_reminders', 'Workout reminders', channelDescription: 'Daily workout reminders', importance: Importance.high, priority: Priority.high)),
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+        );
+      }
+    } catch (_) {}
+  }
+}
+
+class ReminderCard extends StatefulWidget {
+  const ReminderCard({super.key});
+  @override
+  State<ReminderCard> createState() => _RC();
+}
+
+class _RC extends State<ReminderCard> {
+  bool on = false;
+  TimeOfDay tm = const TimeOfDay(hour: 18, minute: 0);
+  Set<int> days = {1, 2, 3, 4, 5, 6, 7};
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    final o = await DB.kv('rem_on') == '1';
+    final t = ((await DB.kv('rem_time')) ?? '18:00').split(':');
+    final d = ((await DB.kv('rem_days')) ?? '1,2,3,4,5,6,7').split(',').map(int.tryParse).whereType<int>().toSet();
+    if (!mounted) return;
+    setState(() {
+      on = o;
+      tm = TimeOfDay(hour: int.tryParse(t[0]) ?? 18, minute: int.tryParse(t.length > 1 ? t[1] : '0') ?? 0);
+      days = d.isEmpty ? {1, 2, 3, 4, 5, 6, 7} : d;
+    });
+  }
+
+  Future<void> save() async {
+    await DB.setKv('rem_on', on ? '1' : '0');
+    await DB.setKv('rem_time', '${tm.hour}:${tm.minute}');
+    final l = days.toList()..sort();
+    await DB.setKv('rem_days', l.join(','));
+    await Remind.reschedule();
+  }
+
+  @override
+  Widget build(BuildContext context) => card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: ttl('Workout reminders', on ? 'Daily at ${tm.format(context)}' : 'Get a nudge when it is time to train')),
+          Switch(
+            value: on,
+            onChanged: (v) async {
+              if (v) await Remind.ask();
+              setState(() => on = v);
+              await save();
+            },
+          ),
+        ]),
+        if (on) ...[
+          const SizedBox(height: 4),
+          sbtn('Time: ${tm.format(context)}', () async {
+            final r = await showTimePicker(context: context, initialTime: tm);
+            if (r == null) return;
+            setState(() => tm = r);
+            await save();
+          }, i: Icons.schedule_rounded),
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            for (var d = 1; d <= 7; d++)
+              FilterChip(
+                label: Text(dn[d - 1].substring(0, 3)),
+                selected: days.contains(d),
+                showCheckmark: false,
+                selectedColor: kG1,
+                backgroundColor: P.soft,
+                labelStyle: ts(13, w: FontWeight.w700, c: days.contains(d) ? Colors.black : null),
+                onSelected: (v) async {
+                  setState(() {
+                    if (v) {
+                      days.add(d);
+                    } else if (days.length > 1) {
+                      days.remove(d);
+                    }
+                  });
+                  await save();
+                },
+              ),
+          ]),
         ],
-      ),
-    ),
-  );
+      ]));
+}
+
+class AdCodeCard extends StatefulWidget {
+  const AdCodeCard({super.key});
+  @override
+  State<AdCodeCard> createState() => _AC();
+}
+
+class _AC extends State<AdCodeCard> {
+  final ctl = TextEditingController();
+  bool off = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Ads.enabled().then((e) {
+      if (mounted) setState(() => off = !e);
+    });
+  }
+
+  @override
+  void dispose() {
+    ctl.dispose();
+    super.dispose();
+  }
+
+  Future<void> apply() async {
+    final v = ctl.text.toLowerCase().replaceAll(RegExp(r'\s+'), '');
+    if (v == noAdsCode) {
+      off = !off;
+      await DB.setKv('noads', off ? '1' : '0');
+      ctl.clear();
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(off ? 'Code accepted. Ads are off.' : 'Ads are back on.')));
+    } else if (v.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('That code is not valid.')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ttl('Ads', off ? 'Ads are off' : 'One short ad after each finished workout'),
+        Row(children: [
+          Expanded(child: TextField(controller: ctl, decoration: fld('Have a code?'))),
+          const SizedBox(width: 10),
+          SizedBox(width: 100, child: pbtn('Apply', apply)),
+        ]),
+      ]));
+}
+
+// ---------- exercise library + full-screen add / edit ----------
+const exLib = [
+  ['Bench Press', 'Chest'], ['Incline Dumbbell Press', 'Chest'], ['Push-ups', 'Chest'], ['Chest Fly', 'Chest'], ['Dips', 'Chest'],
+  ['Pull-ups', 'Back'], ['Lat Pulldown', 'Back'], ['Barbell Row', 'Back'], ['Seated Cable Row', 'Back'], ['Deadlift', 'Back'],
+  ['Shoulder Press', 'Shoulders'], ['Lateral Raise', 'Shoulders'], ['Front Raise', 'Shoulders'], ['Shrugs', 'Shoulders'], ['Shoulder Taps', 'Shoulders'],
+  ['Bicep Curls', 'Arms'], ['Hammer Curls', 'Arms'], ['Tricep Dips', 'Arms'], ['Tricep Pushdown', 'Arms'], ['Skull Crushers', 'Arms'],
+  ['Squats', 'Legs'], ['Lunges', 'Legs'], ['Leg Press', 'Legs'], ['Leg Curl', 'Legs'], ['Leg Extension', 'Legs'], ['Calf Raises', 'Legs'], ['Glute Bridge', 'Legs'], ['Romanian Deadlift', 'Legs'],
+  ['Crunches', 'Core'], ['Leg Raises', 'Core'], ['Russian Twist', 'Core'], ['Bicycle Crunches', 'Core'], ['Plank', 'Core'], ['Side Plank', 'Core'],
+  ['Burpees', 'Cardio'], ['Mountain Climbers', 'Cardio'], ['Jumping Jacks', 'Cardio'], ['High Knees', 'Cardio'], ['Jump Rope', 'Cardio'], ['Running', 'Cardio'],
+];
+
+Future<List<String>?> askItem(BuildContext c) => Navigator.push<List<String>>(c, MaterialPageRoute(builder: (_) => const AddExercisePage()));
+
+Future<List<String>?> askWarm(BuildContext c, {String name = '', int amt = 30, String kind = 'time'}) =>
+    Navigator.push<List<String>>(c, MaterialPageRoute(builder: (_) => AddExercisePage(warm: true, name: name, amt: amt, kind: kind)));
+
+Widget stepper(String label, int v, void Function(int) set, {int step = 1, String unit = ''}) => card(Row(children: [
+      Expanded(child: Text(label, style: ts(15, w: FontWeight.w700))),
+      IconButton(onPressed: () => set(math.max(1, v - step)), icon: Icon(Icons.remove_circle_outline, color: P.mu)),
+      SizedBox(width: 64, child: Text('$v$unit', textAlign: TextAlign.center, style: ts(22, w: FontWeight.w900))),
+      IconButton(onPressed: () => set(v + step), icon: Icon(Icons.add_circle, color: P.ac)),
+    ]));
+
+class AddExercisePage extends StatefulWidget {
+  final bool warm;
+  final String name;
+  final int amt;
+  final String kind;
+  const AddExercisePage({super.key, this.warm = false, this.name = '', this.amt = 0, this.kind = ''});
+  @override
+  State<AddExercisePage> createState() => _AEP();
+}
+
+class _AEP extends State<AddExercisePage> {
+  late final TextEditingController n;
+  int sets = 3;
+  late int amt;
+  late bool timed;
+  String muscle = 'Other';
+  bool touched = false;
+  List<List<String>> known = [];
+
+  @override
+  void initState() {
+    super.initState();
+    n = TextEditingController(text: widget.name);
+    timed = widget.kind == 'time';
+    amt = widget.amt > 0 ? widget.amt : (timed ? 45 : 12);
+    if (widget.name.isNotEmpty) muscle = guess(widget.name);
+    load();
+  }
+
+  @override
+  void dispose() {
+    n.dispose();
+    super.dispose();
+  }
+
+  Future<void> load() async {
+    final seen = <String>{};
+    final out = <List<String>>[];
+    void add(String name, String? m) {
+      if (seen.add(name.toLowerCase())) out.add([name, m ?? guess(name)]);
+    }
+
+    for (final r in await DB.d.query('items')) {
+      add(r['name'] as String, r['muscle'] as String?);
+    }
+    for (final r in await DB.d.query('sets')) {
+      add(r['ex'] as String, r['muscle'] as String?);
+    }
+    for (final e in exLib) {
+      add(e[0], e[1]);
+    }
+    if (!mounted) return;
+    setState(() => known = out);
+  }
+
+  void choose(List<String> e) {
+    setState(() {
+      n.text = e[0];
+      n.selection = TextSelection.collapsed(offset: e[0].length);
+      if (!touched) {
+        muscle = e[1];
+        timed = timedName(e[0]);
+        amt = widget.warm ? (timed ? 30 : 10) : (timed ? 45 : 12);
+      }
+    });
+  }
+
+  void save() {
+    final name = n.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter an exercise name.')));
+      return;
+    }
+    if (widget.warm) {
+      Navigator.pop(context, [name, '$amt', timed ? 'time' : 'reps']);
+    } else {
+      Navigator.pop(context, [name, '$sets', '$amt', muscle == 'Other' ? guess(name) : muscle, timed ? 'time' : 'reps']);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = n.text.trim().toLowerCase();
+    final sugg = known.where((e) => q.isEmpty || e[0].toLowerCase().contains(q)).take(14).toList();
+    return bg(Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: Text(widget.warm ? 'Warm-up exercise' : 'Add exercise', style: ts(20, w: FontWeight.w800))),
+      body: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+        TextField(
+          controller: n,
+          textCapitalization: TextCapitalization.words,
+          decoration: fld('Exercise name'),
+          onChanged: (v) {
+            setState(() {
+              if (!touched) {
+                muscle = guess(v);
+                timed = timedName(v);
+                amt = widget.warm ? (timed ? 30 : 10) : (timed ? 45 : 12);
+              }
+            });
+          },
+        ),
+        const SizedBox(height: 12),
+        if (sugg.isNotEmpty) ...[
+          Text(q.isEmpty ? 'QUICK PICK' : 'SUGGESTIONS', style: ts(11, w: FontWeight.w800, c: P.ac, ls: 1.5)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            for (final e in sugg) ActionChip(label: Text(e[0]), backgroundColor: P.card, labelStyle: ts(13, w: FontWeight.w600), onPressed: () => choose(e)),
+          ]),
+          const SizedBox(height: 16),
+        ],
+        if (!widget.warm) stepper('Sets', sets, (v) => setState(() => sets = v)),
+        card(SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Timed hold (plank, wall sit…)'),
+          value: timed,
+          onChanged: (v) => setState(() {
+            touched = true;
+            timed = v;
+            amt = widget.warm ? (v ? 30 : 10) : (v ? 45 : 12);
+          }),
+        )),
+        stepper(timed ? 'Seconds per set' : 'Reps per set', amt, (v) => setState(() => amt = v), step: timed ? 5 : 1),
+        if (!widget.warm) ...[
+          ttl('Muscle group', 'Other = auto-detect from the name'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final m in muscles)
+              ChoiceChip(
+                label: Text(m),
+                selected: muscle == m,
+                showCheckmark: false,
+                selectedColor: kG1,
+                backgroundColor: P.card,
+                labelStyle: ts(13, w: FontWeight.w700, c: muscle == m ? Colors.black : null),
+                onSelected: (_) => setState(() {
+                  touched = true;
+                  muscle = m;
+                }),
+              ),
+          ]),
+          const SizedBox(height: 20),
+        ],
+        gbtn('Save', save, i: Icons.check_rounded),
+      ]),
+    ));
+  }
+}
+
+Future<Rows> allExercises() async {
+  final m = <String, String>{};
+  final cnt = <String, int>{};
+  for (final r in await DB.d.query('items')) {
+    final n = r['name'] as String;
+    m[n] = (r['muscle'] as String?) ?? guess(n);
+  }
+  for (final r in await DB.d.query('sets')) {
+    final n = r['ex'] as String;
+    m.putIfAbsent(n, () => (r['muscle'] as String?) ?? guess(n));
+    cnt[n] = (cnt[n] ?? 0) + 1;
+  }
+  final Rows out = [
+    for (final e in m.entries) <String, Object?>{'name': e.key, 'muscle': e.value, 'n': cnt[e.key] ?? 0},
+  ];
+  out.sort((a, b) {
+    final x = muscles.indexOf(a['muscle'] as String), y = muscles.indexOf(b['muscle'] as String);
+    if (x != y) return x.compareTo(y);
+    return (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase());
+  });
+  return out;
+}
+
+class ExercisesPage extends StatelessWidget {
+  const ExercisesPage({super.key});
+  @override
+  Widget build(BuildContext context) => Async<Rows>(
+        allExercises,
+        (c, rows) => ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          Padding(padding: const EdgeInsets.only(bottom: 14), child: Text('Tap an exercise to rename it or change its muscle group. Your history and routines update everywhere.', style: ts(14, c: P.mu))),
+          if (rows.isEmpty) Text('No exercises yet. Add some in a routine.', style: ts(14, c: P.mu)),
+          for (final r in rows)
+            GestureDetector(
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => EditExercisePage(r['name'] as String, r['muscle'] as String))),
+              child: card(Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('${r['name']}', style: ts(16, w: FontWeight.w800)),
+                  const SizedBox(height: 6),
+                  chips([r['muscle'] as String]),
+                ])),
+                Text('${r['n']} sets', style: ts(12, c: P.mu)),
+                const SizedBox(width: 8),
+                Icon(Icons.edit_outlined, color: P.mu, size: 18),
+              ])),
+            ),
+        ]),
+      );
+}
+
+class EditExercisePage extends StatefulWidget {
+  final String name, muscle;
+  const EditExercisePage(this.name, this.muscle, {super.key});
+  @override
+  State<EditExercisePage> createState() => _EEP();
+}
+
+class _EEP extends State<EditExercisePage> {
+  late final TextEditingController n;
+  late String muscle;
+
+  @override
+  void initState() {
+    super.initState();
+    n = TextEditingController(text: widget.name);
+    muscle = muscles.contains(widget.muscle) ? widget.muscle : 'Other';
+  }
+
+  @override
+  void dispose() {
+    n.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    final nn = n.text.trim();
+    if (nn.isEmpty) return;
+    await DB.d.update('items', {'name': nn, 'muscle': muscle}, where: 'name=?', whereArgs: [widget.name]);
+    await DB.d.update('sets', {'ex': nn, 'muscle': muscle}, where: 'ex=?', whereArgs: [widget.name]);
+    tick.value++;
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) => bg(Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(backgroundColor: Colors.transparent, title: Text('Edit exercise', style: ts(20, w: FontWeight.w800))),
+        body: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          TextField(controller: n, textCapitalization: TextCapitalization.words, decoration: fld('Exercise name')),
+          const SizedBox(height: 18),
+          ttl('Muscle group'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final m in muscles)
+              ChoiceChip(
+                label: Text(m),
+                selected: muscle == m,
+                showCheckmark: false,
+                selectedColor: kG1,
+                backgroundColor: P.card,
+                labelStyle: ts(13, w: FontWeight.w700, c: muscle == m ? Colors.black : null),
+                onSelected: (_) => setState(() => muscle = m),
+              ),
+          ]),
+          const SizedBox(height: 24),
+          gbtn('Save changes', save, i: Icons.check_rounded),
+        ]),
+      ));
+}
+
+// ---------- best exercises ----------
+double e1rm(double kg, int reps) => kg <= 0 ? 0 : kg * (1 + reps / 30);
+
+class ExBest {
+  double rm = 0, kg = 0, vol = 0;
+  int reps = 0, hold = 0, sets = 0;
+  String muscle = 'Other', last = '';
+}
+
+class BestPage extends StatelessWidget {
+  const BestPage({super.key});
+  @override
+  Widget build(BuildContext context) => Async<St>(St.load, (c, st) {
+        final b = <String, ExBest>{};
+        for (final s in st.ss) {
+          final ex = s['ex'] as String;
+          final e = b.putIfAbsent(ex, () => ExBest());
+          final r = s['reps'] as int;
+          final w = kgOf(s);
+          e.muscle = (s['muscle'] as String?) ?? guess(ex);
+          e.sets++;
+          final day = (s['day'] as String?) ?? '';
+          if (day.compareTo(e.last) > 0) e.last = day;
+          if (s['kind'] == 'time') {
+            e.hold = math.max(e.hold, r);
+          } else {
+            e.reps = math.max(e.reps, r);
+            e.kg = math.max(e.kg, w);
+            e.rm = math.max(e.rm, e1rm(w, r));
+            e.vol += w * r;
+          }
+        }
+        final list = b.entries.toList()
+          ..sort((x, y) {
+            final d = y.value.rm.compareTo(x.value.rm);
+            if (d != 0) return d;
+            final r = y.value.reps.compareTo(x.value.reps);
+            return r != 0 ? r : y.value.hold.compareTo(x.value.hold);
+          });
+        if (list.isEmpty) {
+          return ListView(padding: const EdgeInsets.all(30), children: [
+            const SizedBox(height: 40),
+            Center(child: gicon(Icons.emoji_events_rounded, size: 70)),
+            const SizedBox(height: 12),
+            Text('No records yet', textAlign: TextAlign.center, style: ts(22, w: FontWeight.w800)),
+            Text('Finish a workout and your best lifts show up here.', textAlign: TextAlign.center, style: ts(14, c: P.mu)),
+          ]);
+        }
+        final top = list.first;
+        return ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          card(
+            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [gicon(Icons.emoji_events_rounded, size: 20), const SizedBox(width: 8), Text('STRONGEST EXERCISE', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5))]),
+              const SizedBox(height: 8),
+              Text(top.key, style: ts(26, w: FontWeight.w900)),
+              const SizedBox(height: 4),
+              Text(
+                top.value.rm > 0
+                    ? 'Estimated 1-rep max ${numTxt(top.value.rm)} kg · best set ${numTxt(top.value.kg)} kg × ${top.value.reps}'
+                    : top.value.reps > 0
+                        ? 'Most reps in one set: ${top.value.reps}'
+                        : 'Longest hold: ${tf(top.value.hold)}',
+                style: ts(14, c: P.mu),
+              ),
+            ]),
+            g: P.hero,
+          ),
+          for (var i = 0; i < list.length; i++)
+            card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(gradient: i < 3 ? kGrad : null, color: i < 3 ? null : P.soft, borderRadius: BorderRadius.circular(10)),
+                  child: Text('${i + 1}', style: ts(14, w: FontWeight.w900, c: i < 3 ? Colors.black : P.mu)),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text(list[i].key, style: ts(16, w: FontWeight.w800))),
+                chips([list[i].value.muscle]),
+              ]),
+              const SizedBox(height: 10),
+              Wrap(spacing: 18, runSpacing: 6, children: [
+                if (list[i].value.rm > 0) bestStat('Est. 1RM', '${numTxt(list[i].value.rm)} kg'),
+                if (list[i].value.kg > 0) bestStat('Heaviest', '${numTxt(list[i].value.kg)} kg'),
+                if (list[i].value.reps > 0) bestStat('Most reps', '${list[i].value.reps}'),
+                if (list[i].value.hold > 0) bestStat('Longest hold', tf(list[i].value.hold)),
+                if (list[i].value.vol > 0) bestStat('Volume', '${list[i].value.vol.round()} kg'),
+                bestStat('Sets done', '${list[i].value.sets}'),
+              ]),
+              if (list[i].value.last.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text('Last done ${list[i].value.last}', style: ts(12, c: P.mu))),
+            ])),
+        ]);
+      });
+}
+
+Widget bestStat(String l, String v) => Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Text(l, style: ts(11, c: P.mu)),
+      Text(v, style: ts(15, w: FontWeight.w800, c: P.ac)),
+    ]);
+
+// ---------- plate calculator ----------
+class PlatePage extends StatefulWidget {
+  const PlatePage({super.key});
+  @override
+  State<PlatePage> createState() => _PL();
+}
+
+class _PL extends State<PlatePage> {
+  final target = TextEditingController(text: '60'), bar = TextEditingController(text: '20');
+
+  @override
+  void dispose() {
+    target.dispose();
+    bar.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = double.tryParse(target.text) ?? 0, b = double.tryParse(bar.text) ?? 0;
+    var rem = (t - b) / 2;
+    final out = <MapEntry<double, int>>[];
+    if (rem > 0) {
+      for (final pl in const [25.0, 20.0, 15.0, 10.0, 5.0, 2.5, 1.25]) {
+        final k = (rem / pl + 1e-9).floor();
+        if (k > 0) {
+          out.add(MapEntry(pl, k));
+          rem -= k * pl;
+        }
+      }
+    }
+    final loadable = t - 2 * (rem > 0.001 ? rem : 0);
+    return ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+      Row(children: [
+        Expanded(child: TextField(controller: target, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: fld('Target weight (kg)'), onChanged: (_) => setState(() {}))),
+        const SizedBox(width: 12),
+        Expanded(child: TextField(controller: bar, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: fld('Bar (kg)'), onChanged: (_) => setState(() {}))),
+      ]),
+      const SizedBox(height: 16),
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ttl('Plates on each side'),
+        if (t <= b) Text('Target must be heavier than the bar.', style: ts(14, c: P.mu)),
+        for (final e in out)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(10)),
+                child: Text('${e.value} ×', style: ts(15, w: FontWeight.w900, c: Colors.black)),
+              ),
+              const SizedBox(width: 12),
+              Text('${numTxt(e.key)} kg', style: ts(18, w: FontWeight.w800)),
+            ]),
+          ),
+        if (t > b && rem > 0.001) Padding(padding: const EdgeInsets.only(top: 8), child: Text('Closest loadable weight: ${numTxt(loadable)} kg', style: ts(13, c: P.mu))),
+        if (t > b && out.isNotEmpty && rem <= 0.001) Padding(padding: const EdgeInsets.only(top: 8), child: Text('Total ${numTxt(t)} kg', style: ts(13, c: P.mu))),
+      ])),
+    ]);
+  }
+}
+
+// ---------- csv export ----------
+Future<void> exportCsv(BuildContext c) async {
+  try {
+    final rows = await DB.d.rawQuery('SELECT w.day, w.routine, s.ex, s.muscle, s.reps, s.kg, s.kind FROM sets s JOIN workouts w ON w.id=s.wid ORDER BY w.ts, s.id');
+    String q(Object? v) => '"${(v ?? '').toString().replaceAll('"', '""')}"';
+    final b = StringBuffer('date,routine,exercise,muscle,reps_or_seconds,kg,type\n');
+    for (final r in rows) {
+      b.writeln([r['day'], r['routine'], r['ex'], r['muscle'], r['reps'], r['kg'], r['kind'] == 'time' ? 'seconds' : 'reps'].map(q).join(','));
+    }
+    final f = File(p.join(Directory.systemTemp.path, 'fittrack_export_${dk(DateTime.now())}.csv'));
+    await f.writeAsString(b.toString());
+    await Share.shareXFiles([XFile(f.path)], text: 'FitTrack export');
+  } catch (_) {
+    if (c.mounted) ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('Export failed. Try again.')));
+  }
 }
 
 // ---------- charts ----------
@@ -737,40 +1397,6 @@ class RingPainter extends CustomPainter {
 }
 
 // ---------- warm-up ----------
-Future<List<String>?> askWarm(BuildContext c, {String name = '', int amt = 30, String kind = 'time'}) {
-  final n = TextEditingController(text: name), r = TextEditingController(text: '$amt');
-  var timed = kind == 'time';
-  return showDialog<List<String>>(
-    context: c,
-    builder: (d) => StatefulBuilder(
-      builder: (d, set) => AlertDialog(
-        backgroundColor: P.card,
-        title: Text(name.isEmpty ? 'Add warm-up exercise' : 'Edit warm-up exercise'),
-        content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(controller: n, autofocus: name.isEmpty, textCapitalization: TextCapitalization.sentences, decoration: const InputDecoration(labelText: 'Exercise name')),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Timed (seconds)'),
-              subtitle: const Text('Off = count reps'),
-              value: timed,
-              onChanged: (v) => set(() {
-                timed = v;
-                r.text = v ? '30' : '10';
-              }),
-            ),
-            TextField(controller: r, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: timed ? 'Seconds' : 'Reps')),
-          ]),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(d, [n.text.trim(), r.text, timed ? 'time' : 'reps']), child: const Text('Save')),
-        ],
-      ),
-    ),
-  );
-}
-
 String warmAmt(Map<String, Object?> w) => w['kind'] == 'time' ? tf(w['amt'] as int) : '${w['amt']} reps';
 
 int warmSecs(Rows w) => w.fold<int>(0, (a, e) => a + (e['kind'] == 'time' ? (e['amt'] as int) : 20));
@@ -1080,7 +1706,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.3.2', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.4', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -1089,6 +1715,9 @@ class _ShellState extends State<Shell> {
                 item(context, Icons.list_alt_rounded, 'My routines', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('My routines', const RoutinesPage())))),
                 item(context, Icons.insights_rounded, 'Progress & results', () => go(2)),
                 item(context, Icons.history_rounded, 'Workout history', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('History', const HistoryPage())))),
+                item(context, Icons.emoji_events_rounded, 'Best exercises', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Best exercises', const BestPage())))),
+                item(context, Icons.edit_note_rounded, 'Edit exercises', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Exercises', const ExercisesPage())))),
+                item(context, Icons.calculate_rounded, 'Plate calculator', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Plate calculator', const PlatePage())))),
                 item(context, Icons.photo_camera_rounded, 'Transformation', () => go(3)),
                 item(context, Icons.person_rounded, 'Profile & backup', () => go(4)),
               ]),
@@ -1475,10 +2104,15 @@ class _WS extends State<WorkoutPage> {
   Timer? t;
   final logged = <Map<String, Object?>>[];
   final kg = TextEditingController();
+  final Map<String, Rows> prev = {};
+  final Map<String, List<double>> hb = {};
+  String? prMsg;
+  int prs = 0;
 
   @override
   void initState() {
     super.initState();
+    loadHist();
     exs = [for (final i in widget.items) i['name'] as String];
     for (final i in widget.items) {
       final n = i['name'] as String;
@@ -1503,6 +2137,28 @@ class _WS extends State<WorkoutPage> {
         }
       });
     });
+  }
+
+  Future<void> loadHist() async {
+    final r = await DB.d.rawQuery('SELECT ex, reps, kg, kind, wid FROM sets ORDER BY wid DESC, id ASC');
+    final lastW = <String, int>{};
+    for (final x in r) {
+      final ex = x['ex'] as String;
+      final wid = x['wid'] as int;
+      lastW.putIfAbsent(ex, () => wid);
+      if (lastW[ex] == wid) prev.putIfAbsent(ex, () => []).add(x);
+      final b = hb.putIfAbsent(ex, () => [0, 0, 0, 0]);
+      final reps = x['reps'] as int;
+      final w = kgOf(x);
+      if (x['kind'] == 'time') {
+        b[3] = math.max(b[3], reps.toDouble());
+      } else {
+        b[0] = math.max(b[0], reps.toDouble());
+        b[1] = math.max(b[1], w);
+        b[2] = math.max(b[2], e1rm(w, reps));
+      }
+    }
+    if (mounted) setState(() {});
   }
 
   @override
@@ -1564,8 +2220,33 @@ class _WS extends State<WorkoutPage> {
     final v = timed ? hold : reps;
     if (v <= 0) return;
     var moved = false;
+    final w = timed ? 0.0 : (double.tryParse(kg.text) ?? 0.0);
+    final b = hb.putIfAbsent(ex, () => [0, 0, 0, 0]);
+    final hadHist = b[0] + b[3] > 0;
+    String? pr;
+    if (timed) {
+      if (hadHist && v > b[3]) pr = '$ex: ${tf(v)} hold';
+      b[3] = math.max(b[3], v.toDouble());
+    } else {
+      final rm = e1rm(w, v);
+      if (hadHist && (w > 0 ? rm > b[2] + 0.01 : (b[2] == 0 && v > b[0]))) {
+        pr = w > 0 ? '$ex: ${numTxt(w)} kg × $v' : '$ex: $v reps';
+      }
+      b[0] = math.max(b[0], v.toDouble());
+      b[1] = math.max(b[1], w);
+      b[2] = math.max(b[2], rm);
+    }
+    if (pr != null) {
+      prs++;
+      prMsg = pr;
+      HapticFeedback.heavyImpact();
+      final shown = pr;
+      Future.delayed(const Duration(seconds: 6), () {
+        if (mounted && prMsg == shown) setState(() => prMsg = null);
+      });
+    }
     setState(() {
-      logged.add({'ex': ex, 'reps': v, 'kg': timed ? 0.0 : (double.tryParse(kg.text) ?? 0.0), 'muscle': mus[ex] ?? 'Other', 'kind': timed ? 'time' : 'reps'});
+      logged.add({'ex': ex, 'reps': v, 'kg': w, 'muscle': mus[ex] ?? 'Other', 'kind': timed ? 'time' : 'reps'});
       reps = 0;
       hold = 0;
       holding = false;
@@ -1599,13 +2280,15 @@ class _WS extends State<WorkoutPage> {
         builder: (d) => AlertDialog(
           backgroundColor: P.card,
           title: const Text('Workout complete 💪'),
-          content: Text('${fmt(secs)}  ·  ${logged.length} sets${tot > 0 ? '  ·  $tot reps' : ''}${held > 0 ? '  ·  ${tf(held)} held' : ''}', style: ts(18)),
+          content: Text('${fmt(secs)}  ·  ${logged.length} sets${tot > 0 ? '  ·  $tot reps' : ''}${held > 0 ? '  ·  ${tf(held)} held' : ''}${prs > 0 ? '\n🏆 $prs new personal record${prs == 1 ? '' : 's'}' : ''}', style: ts(18)),
           actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Nice'))],
         ),
       );
     }
+    final had = logged.isNotEmpty;
     if (!mounted) return;
     Navigator.pop(context);
+    if (had) Ads.maybeShow();
   }
 
   @override
@@ -1699,6 +2382,18 @@ class _WS extends State<WorkoutPage> {
             ]),
           ),
           const SizedBox(height: 14),
+          if (prMsg != null)
+            card(
+              Row(children: [
+                gicon(Icons.emoji_events_rounded, size: 34),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('NEW PERSONAL RECORD', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
+                  Text(prMsg!, style: ts(17, w: FontWeight.w800)),
+                ])),
+              ]),
+              g: P.hero,
+            ),
           if (ex == null)
             card(Text('Tap Add to choose your first exercise.', style: ts(14, c: P.mu)))
           else
@@ -1709,6 +2404,19 @@ class _WS extends State<WorkoutPage> {
               if (tS != null) ...[
                 const SizedBox(height: 4),
                 Text('Target: $tS sets × ${amt(ex, tR ?? 0)}${timed ? '' : ' reps'}', style: ts(13, c: P.mu)),
+              ],
+              if ((prev[ex] ?? []).isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: P.soft, borderRadius: BorderRadius.circular(12)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('LAST TIME', style: ts(10, w: FontWeight.w800, c: P.ac, ls: 1.5)),
+                    const SizedBox(height: 2),
+                    Text(prev[ex]!.map((x) => x['kind'] == 'time' ? tf(x['reps'] as int) : '${x['reps']}${kgOf(x) > 0 ? ' × ${numTxt(kgOf(x))}kg' : ''}').join('  ·  '), style: ts(13, w: FontWeight.w700)),
+                  ]),
+                ),
               ],
               const SizedBox(height: 12),
               Wrap(alignment: WrapAlignment.center, spacing: 8, runSpacing: 8, children: [
@@ -1775,20 +2483,27 @@ class _WS extends State<WorkoutPage> {
               gbtn('Log set', logSet, i: Icons.check_rounded),
             ])),
           if (restLeft > 0)
-            card(Column(children: [
-              Row(children: [
-                gicon(Icons.hourglass_bottom_rounded),
-                const SizedBox(width: 10),
-                Text('Rest ${fmt(restLeft)}', style: ts(22, w: FontWeight.w800)),
-                const Spacer(),
+            card(Row(children: [
+              SizedBox(
+                width: 76,
+                height: 76,
+                child: Stack(alignment: Alignment.center, children: [
+                  CustomPaint(size: const Size(76, 76), painter: RingPainter(restLeft / (restTot < 1 ? 1 : restTot), w: 8)),
+                  Text(fmt(restLeft), style: ts(16, w: FontWeight.w900)),
+                ]),
+              ),
+              const SizedBox(width: 14),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Rest', style: ts(20, w: FontWeight.w800)),
+                Text(ex != null && !doneEx(ex) ? 'Next: $ex, set ${mine.length + 1}' : 'Get ready for the next exercise', style: ts(13, c: P.mu)),
+              ])),
+              Column(children: [
                 TextButton(onPressed: () => setState(() {
                       restLeft += 15;
                       restTot += 15;
                     }), child: const Text('+15s')),
                 TextButton(onPressed: () => setState(() => restLeft = 0), child: const Text('Skip')),
               ]),
-              const SizedBox(height: 6),
-              gbar(restLeft / (restTot < 1 ? 1 : restTot)),
             ])),
           if (logged.isNotEmpty)
             card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2068,6 +2783,8 @@ class StatsPage extends StatelessWidget {
                 ),
             ]),
           ])),
+          sbtn('Best exercises', () => Navigator.push(c, MaterialPageRoute(builder: (_) => sub('Best exercises', const BestPage()))), i: Icons.emoji_events_rounded),
+          sbtn('Export data (CSV)', () => exportCsv(c), i: Icons.table_chart_rounded),
           gbtn('Full workout history', () => Navigator.push(c, MaterialPageRoute(builder: (_) => sub('History', const HistoryPage()))), i: Icons.history_rounded),
         ]);
       });
@@ -2393,7 +3110,9 @@ class _PP extends State<ProfilePage> {
         ]),
         Center(child: TextButton(onPressed: restoreText, child: Text('Restore from copied text (v1.2 backup)', style: ts(12, c: P.mu)))),
       ])),
-      Text('FitTrack v1.3.2 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      const ReminderCard(),
+      const AdCodeCard(),
+      Text('FitTrack v1.4 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }

@@ -28,6 +28,10 @@ jobs:
               def ext = p.extensions.findByName('android')
               if (ext != null) {
                 try { ext.compileSdk = 36 } catch (Throwable t) { ext.compileSdkVersion(36) }
+                if (p.plugins.hasPlugin('com.android.application')) {
+                  try { ext.compileOptions.coreLibraryDesugaringEnabled = true } catch (Throwable t) { println 'desugar flag failed: ' + t }
+                  p.dependencies.add('coreLibraryDesugaring', 'com.android.tools:desugar_jdk_libs:2.1.4')
+                }
               }
             }
           }
@@ -36,11 +40,15 @@ jobs:
         run: |
           [ -d android ] || flutter create --platforms=android --project-name fittrack --org com.fittrack .
           rm -rf test
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <application#' $M
+          sed -i 's#</application>#    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713"/>\n        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>\n        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/><action android:name="android.intent.action.MY_PACKAGE_REPLACED"/><action android:name="android.intent.action.QUICKBOOT_POWERON"/><action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/></intent-filter></receiver>\n    </application>#' $M
+          cat $M
           sed -i 's/android:label="[^"]*"/android:label="FitTrack"/' android/app/src/main/AndroidManifest.xml
           flutter pub get
           dart run flutter_launcher_icons
           flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
-          name: fittrack-v1.3.2-apk
+          name: fittrack-v1.4-apk
           path: build/app/outputs/flutter-apk/app-release.apk
