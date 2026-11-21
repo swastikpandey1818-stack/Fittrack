@@ -117,12 +117,13 @@ String cover(List<String> ms) {
 class DB {
   static late Database d;
   static const schedSql = 'CREATE TABLE schedule(day INTEGER, slot INTEGER, rid INTEGER, PRIMARY KEY(day, slot))';
+  static const warmSql = 'CREATE TABLE warmups(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amt INTEGER, kind TEXT, pos INTEGER)';
   static const photoSql = 'CREATE TABLE photos(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, day TEXT, path TEXT, kg REAL, note TEXT)';
 
   static Future<void> init() async {
     d = await openDatabase(
       p.join(await getDatabasesPath(), 'fittrack.db'),
-      version: 4,
+      version: 5,
       onCreate: (db, v) async {
         await db.execute('CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT)');
         await db.execute('CREATE TABLE routines(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
@@ -132,6 +133,8 @@ class DB {
         await db.execute('CREATE TABLE logins(day TEXT PRIMARY KEY)');
         await db.execute(schedSql);
         await db.execute(photoSql);
+        await db.execute(warmSql);
+        await seedWarm(db);
         await seed(db, fresh: true);
       },
       onUpgrade: (db, o, n) async {
@@ -164,9 +167,26 @@ class DB {
             }
           }
         }
+        if (o < 5) {
+          await db.execute(warmSql);
+          await seedWarm(db);
+        }
         if (o < 2) await seed(db, fresh: false);
       },
     );
+  }
+
+  static Future<void> seedWarm(Database db) async {
+    const w = [
+      ['Jumping jacks', 30, 'time'],
+      ['Arm circles', 30, 'time'],
+      ['High knees', 30, 'time'],
+      ['Hip rotations', 20, 'time'],
+      ['Bodyweight squats', 10, 'reps'],
+    ];
+    for (var i = 0; i < w.length; i++) {
+      await db.insert('warmups', {'name': w[i][0], 'amt': w[i][1], 'kind': w[i][2], 'pos': i});
+    }
   }
 
   static Future<void> seed(Database db, {required bool fresh}) async {
@@ -198,6 +218,8 @@ class DB {
     await d.insert('kv', {'k': k, 'v': v}, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 }
+
+Future<Rows> warmList() async => (await DB.d.query('warmups', orderBy: 'pos, id')).toList();
 
 Future<Map<String, Object?>?> planFor(int wd, int slot) async {
   final s = await DB.d.query('schedule', where: 'day=? AND slot=?', whereArgs: [wd, slot]);
@@ -249,10 +271,10 @@ class St {
 }
 
 // ---------- backup (data + photos in one file) ----------
-const bkTables = ['kv', 'routines', 'items', 'workouts', 'sets', 'logins', 'schedule'];
+const bkTables = ['kv', 'routines', 'items', 'workouts', 'sets', 'logins', 'schedule', 'warmups'];
 
 Future<String> buildBackup() async {
-  final o = <String, Object?>{'app': 'fittrack', 'v': 3};
+  final o = <String, Object?>{'app': 'fittrack', 'v': 4};
   for (final t in bkTables) {
     o[t] = await DB.d.query(t);
   }
@@ -291,8 +313,10 @@ Future<String?> importBackup(String s) async {
     final old = await DB.d.query('photos');
     await DB.d.transaction((tx) async {
       for (final t in bkTables) {
+        final list = o[t] as List?;
+        if (list == null && t == 'warmups') continue;
         await tx.delete(t);
-        for (final r in (o[t] as List)) {
+        for (final r in (list ?? [])) {
           final m = Map<String, Object?>.from(r as Map);
           if (t == 'schedule') m.putIfAbsent('slot', () => 0);
           await tx.insert(t, m);
@@ -393,6 +417,24 @@ Widget sbtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (i != null) ...[Icon(i, color: P.ac), const SizedBox(width: 8)],
           Text(t, style: ts(16, w: FontWeight.w800, c: P.ac)),
+        ]),
+      ),
+    );
+
+Widget pbtn(String t, VoidCallback f, {IconData? i, bool fill = true}) => GestureDetector(
+      onTap: f,
+      child: Container(
+        height: 46,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          gradient: fill ? kGrad : null,
+          color: fill ? null : P.soft,
+          borderRadius: BorderRadius.circular(14),
+          border: fill ? null : Border.all(color: kG1.withOpacity(.5)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (i != null) ...[Icon(i, size: 20, color: fill ? Colors.black : P.ac), const SizedBox(width: 6)],
+          Flexible(child: Text(t, overflow: TextOverflow.ellipsis, style: ts(14, w: FontWeight.w800, c: fill ? Colors.black : P.ac))),
         ]),
       ),
     );
@@ -531,18 +573,49 @@ Future<List<String>?> askItem(BuildContext c) {
 }
 
 // ---------- charts ----------
+double niceMax(List<double> v) {
+  final m = v.fold<double>(0, (a, b) => b > a ? b : a);
+  if (m <= 0) return 1;
+  final pw = math.pow(10, (math.log(m) / math.ln10).floor()).toDouble();
+  final n = m / pw;
+  final k = n <= 1 ? 1 : n <= 2 ? 2 : n <= 3 ? 3 : n <= 5 ? 5 : 10;
+  return k * pw;
+}
+
+String numTxt(double x) => x == x.roundToDouble() ? x.round().toString() : x.toStringAsFixed(1);
+
+void txt(Canvas c, String t, Offset o, {double size = 10, Color? col, FontWeight w = FontWeight.w400, bool center = false, bool right = false}) {
+  final tp = TextPainter(text: TextSpan(text: t, style: TextStyle(color: col ?? P.mu, fontSize: size, fontWeight: w)), textDirection: TextDirection.ltr)..layout();
+  final dx = center ? o.dx - tp.width / 2 : right ? o.dx - tp.width : o.dx;
+  tp.paint(c, Offset(dx, o.dy));
+}
+
 class BarsPainter extends CustomPainter {
   final List<double> v;
   final List<String> l;
   BarsPainter(this.v, this.l);
   @override
   void paint(Canvas c, Size s) {
-    final mx = v.fold<double>(1, (a, b) => b > a ? b : a);
+    if (v.isEmpty) return;
+    final mx = niceMax(v);
+    const top = 18.0, bot = 22.0;
+    final ch = s.height - top - bot;
+    final grid = Paint()
+      ..color = P.line
+      ..strokeWidth = 1;
+    for (var g = 0; g <= 2; g++) {
+      final y = top + ch * g / 2;
+      c.drawLine(Offset(0, y), Offset(s.width, y), grid);
+    }
+    txt(c, numTxt(mx), const Offset(0, 3), size: 10);
+    txt(c, numTxt(mx / 2), Offset(0, top + ch / 2 - 13), size: 10);
     final w = s.width / v.length;
     for (var i = 0; i < v.length; i++) {
-      var h = (s.height - 22) * v[i] / mx;
-      if (h < 4) h = v[i] == 0 ? 3 : 4;
-      final r = RRect.fromRectAndRadius(Rect.fromLTWH(i * w + w * .2, s.height - 22 - h, w * .6, h), const Radius.circular(8));
+      final last = i == v.length - 1;
+      var h = ch * v[i] / mx;
+      if (v[i] > 0 && h < 5) h = 5;
+      if (v[i] <= 0) h = 3;
+      final r = RRect.fromRectAndRadius(Rect.fromLTWH(i * w + w * .2, top + ch - h, w * .6, h), const Radius.circular(7));
       final paint = Paint();
       if (v[i] > 0) {
         paint.shader = kGrad.createShader(r.outerRect);
@@ -550,8 +623,10 @@ class BarsPainter extends CustomPainter {
         paint.color = P.line;
       }
       c.drawRRect(r, paint);
-      final tp = TextPainter(text: TextSpan(text: l[i], style: TextStyle(color: P.mu, fontSize: 11)), textDirection: TextDirection.ltr)..layout();
-      tp.paint(c, Offset(i * w + (w - tp.width) / 2, s.height - 16));
+      if (v[i] > 0 && v.length <= 10) {
+        txt(c, numTxt(v[i]), Offset(i * w + w / 2, top + ch - h - 13), size: 10, col: P.ac, w: FontWeight.w700, center: true);
+      }
+      txt(c, l[i], Offset(i * w + w / 2, s.height - 16), size: 11, col: last ? P.ac : P.mu, w: last ? FontWeight.w800 : FontWeight.w400, center: true);
     }
   }
 
@@ -561,27 +636,60 @@ class BarsPainter extends CustomPainter {
 
 class TrendPainter extends CustomPainter {
   final List<double> v;
-  TrendPainter(this.v);
+  final List<String> l;
+  TrendPainter(this.v, {this.l = const []});
   @override
   void paint(Canvas c, Size s) {
     if (v.length < 2) return;
-    final mx = v.fold<double>(1, (a, b) => b > a ? b : a);
-    final path = Path();
-    for (var i = 0; i < v.length; i++) {
-      final x = i * s.width / (v.length - 1);
-      final y = s.height - 8 - (s.height - 16) * v[i] / mx;
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
+    final mx = niceMax(v);
+    const top = 18.0, bot = 20.0;
+    final ch = s.height - top - bot;
+    final grid = Paint()
+      ..color = P.line
+      ..strokeWidth = 1;
+    for (var g = 0; g <= 2; g++) {
+      final y = top + ch * g / 2;
+      c.drawLine(Offset(0, y), Offset(s.width, y), grid);
+    }
+    txt(c, numTxt(mx), const Offset(0, 3), size: 10);
+    txt(c, numTxt(mx / 2), Offset(0, top + ch / 2 - 13), size: 10);
+    final pts = <Offset>[for (var i = 0; i < v.length; i++) Offset(i * s.width / (v.length - 1), top + ch - ch * v[i] / mx)];
+    final path = Path()..moveTo(pts[0].dx, pts[0].dy);
+    for (var i = 1; i < pts.length; i++) {
+      final m = Offset((pts[i - 1].dx + pts[i].dx) / 2, (pts[i - 1].dy + pts[i].dy) / 2);
+      path.quadraticBezierTo(pts[i - 1].dx, pts[i - 1].dy, m.dx, m.dy);
+    }
+    path.lineTo(pts.last.dx, pts.last.dy);
+    final fill = Path.from(path)
+      ..lineTo(s.width, top + ch)
+      ..lineTo(0, top + ch)
+      ..close();
+    c.drawPath(fill, Paint()..shader = const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x5500E676), Color(0x0000E676)]).createShader(Rect.fromLTWH(0, top, s.width, ch)));
+    c.drawPath(
+      path,
+      Paint()
+        ..shader = kGrad.createShader(Rect.fromLTWH(0, 0, s.width, s.height))
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+    for (var i = 0; i < pts.length; i++) {
+      if (v[i] > 0 && i != pts.length - 1) {
+        c.drawCircle(pts[i], 3, Paint()..color = P.ac);
       }
     }
-    final fill = Path.from(path)
-      ..lineTo(s.width, s.height)
-      ..lineTo(0, s.height)
-      ..close();
-    c.drawPath(fill, Paint()..shader = const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x6600E676), Color(0x0000E676)]).createShader(Rect.fromLTWH(0, 0, s.width, s.height)));
-    c.drawPath(path, Paint()..shader = kGrad.createShader(Rect.fromLTWH(0, 0, s.width, s.height))..style = PaintingStyle.stroke..strokeWidth = 3.5..strokeJoin = StrokeJoin.round);
+    final e = pts.last;
+    c.drawCircle(e, 9, Paint()..color = kG1.withOpacity(.25));
+    c.drawCircle(e, 5, Paint()..color = kG1);
+    if (v.last > 0) {
+      txt(c, numTxt(v.last), Offset(e.dx - 4, e.dy - 18), size: 11, col: P.ac, w: FontWeight.w800, right: true);
+    }
+    if (l.length == 3) {
+      txt(c, l[0], Offset(0, s.height - 14), size: 10);
+      txt(c, l[1], Offset(s.width / 2, s.height - 14), size: 10, center: true);
+      txt(c, l[2], Offset(s.width, s.height - 14), size: 10, right: true);
+    }
   }
 
   @override
@@ -596,17 +704,295 @@ class PiePainter extends CustomPainter {
   void paint(Canvas c, Size s) {
     final tot = v.fold<double>(0, (a, b) => a + b);
     if (tot == 0) return;
-    final rect = Rect.fromCircle(center: s.center(Offset.zero), radius: s.shortestSide / 2 - 16);
+    final rect = Rect.fromCircle(center: s.center(Offset.zero), radius: s.shortestSide / 2 - 18);
+    c.drawArc(rect, 0, 2 * math.pi, false, Paint()..color = P.soft..style = PaintingStyle.stroke..strokeWidth = 24);
     var a = -math.pi / 2;
     for (var i = 0; i < v.length; i++) {
       final sw = 2 * math.pi * v[i] / tot;
-      c.drawArc(rect, a, sw > .04 ? sw - .03 : sw, false, Paint()..color = cols[i]..style = PaintingStyle.stroke..strokeWidth = 26);
+      c.drawArc(rect, a, sw > .06 ? sw - .05 : sw, false, Paint()..color = cols[i]..style = PaintingStyle.stroke..strokeWidth = 24..strokeCap = sw > .06 ? StrokeCap.round : StrokeCap.butt);
       a += sw;
     }
   }
 
   @override
   bool shouldRepaint(covariant CustomPainter o) => true;
+}
+
+class RingPainter extends CustomPainter {
+  final double f;
+  final double w;
+  RingPainter(this.f, {this.w = 10});
+  @override
+  void paint(Canvas c, Size s) {
+    final r = Rect.fromCircle(center: s.center(Offset.zero), radius: s.shortestSide / 2 - w / 2);
+    c.drawArc(r, 0, 2 * math.pi, false, Paint()..color = P.soft..style = PaintingStyle.stroke..strokeWidth = w);
+    final x = f.clamp(0.0, 1.0).toDouble();
+    if (x > 0) {
+      c.drawArc(r, -math.pi / 2, 2 * math.pi * x, false, Paint()..shader = kGrad.createShader(r)..style = PaintingStyle.stroke..strokeWidth = w..strokeCap = StrokeCap.round);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter o) => true;
+}
+
+// ---------- warm-up ----------
+Future<List<String>?> askWarm(BuildContext c, {String name = '', int amt = 30, String kind = 'time'}) {
+  final n = TextEditingController(text: name), r = TextEditingController(text: '$amt');
+  var timed = kind == 'time';
+  return showDialog<List<String>>(
+    context: c,
+    builder: (d) => StatefulBuilder(
+      builder: (d, set) => AlertDialog(
+        backgroundColor: P.card,
+        title: Text(name.isEmpty ? 'Add warm-up exercise' : 'Edit warm-up exercise'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: n, autofocus: name.isEmpty, textCapitalization: TextCapitalization.sentences, decoration: const InputDecoration(labelText: 'Exercise name')),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Timed (seconds)'),
+              subtitle: const Text('Off = count reps'),
+              value: timed,
+              onChanged: (v) => set(() {
+                timed = v;
+                r.text = v ? '30' : '10';
+              }),
+            ),
+            TextField(controller: r, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: timed ? 'Seconds' : 'Reps')),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(d, [n.text.trim(), r.text, timed ? 'time' : 'reps']), child: const Text('Save')),
+        ],
+      ),
+    ),
+  );
+}
+
+String warmAmt(Map<String, Object?> w) => w['kind'] == 'time' ? tf(w['amt'] as int) : '${w['amt']} reps';
+
+int warmSecs(Rows w) => w.fold<int>(0, (a, e) => a + (e['kind'] == 'time' ? (e['amt'] as int) : 20));
+
+Future<void> moveWarm(Rows rows, int i, int d) async {
+  final j = i + d;
+  if (j < 0 || j >= rows.length) return;
+  final ids = [for (final r in rows) r['id'] as int];
+  final x = ids.removeAt(i);
+  ids.insert(j, x);
+  for (var k = 0; k < ids.length; k++) {
+    await DB.d.update('warmups', {'pos': k}, where: 'id=?', whereArgs: [ids[k]]);
+  }
+  tick.value++;
+}
+
+class WarmupEditor extends StatelessWidget {
+  const WarmupEditor({super.key});
+
+  Future<void> add(BuildContext c, int n) async {
+    final v = await askWarm(c);
+    if (v == null || v[0].isEmpty) return;
+    await DB.d.insert('warmups', {'name': v[0], 'amt': math.max(1, int.tryParse(v[1]) ?? 30), 'kind': v[2], 'pos': n});
+    tick.value++;
+  }
+
+  Future<void> edit(BuildContext c, Map<String, Object?> r) async {
+    final v = await askWarm(c, name: r['name'] as String, amt: r['amt'] as int, kind: (r['kind'] as String?) ?? 'time');
+    if (v == null || v[0].isEmpty) return;
+    await DB.d.update('warmups', {'name': v[0], 'amt': math.max(1, int.tryParse(v[1]) ?? 30), 'kind': v[2]}, where: 'id=?', whereArgs: [r['id']]);
+    tick.value++;
+  }
+
+  @override
+  Widget build(BuildContext context) => Async<Rows>(
+        warmList,
+        (c, rows) => ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 14),
+            child: Text('These exercises run in order before your workout. Tap one to edit it, use the arrows to reorder.', style: ts(14, c: P.mu)),
+          ),
+          if (rows.isNotEmpty) gbtn('Start warm-up (about ${(warmSecs(rows) / 60).ceil()} min)', () => Navigator.push(c, MaterialPageRoute(builder: (_) => const WarmupPage())), i: Icons.play_arrow_rounded),
+          for (var i = 0; i < rows.length; i++)
+            GestureDetector(
+              onTap: () => edit(c, rows[i]),
+              child: card(Row(children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(12)),
+                  child: Text('${i + 1}', style: ts(15, w: FontWeight.w900, c: Colors.black)),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('${rows[i]['name']}', style: ts(16, w: FontWeight.w800)),
+                  Text(warmAmt(rows[i]), style: ts(13, c: P.mu)),
+                ])),
+                IconButton(visualDensity: VisualDensity.compact, onPressed: i == 0 ? null : () => moveWarm(rows, i, -1), icon: Icon(Icons.keyboard_arrow_up_rounded, color: P.mu)),
+                IconButton(visualDensity: VisualDensity.compact, onPressed: i == rows.length - 1 ? null : () => moveWarm(rows, i, 1), icon: Icon(Icons.keyboard_arrow_down_rounded, color: P.mu)),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () async {
+                    await DB.d.delete('warmups', where: 'id=?', whereArgs: [rows[i]['id']]);
+                    tick.value++;
+                  },
+                  icon: const Icon(Icons.close, color: Colors.redAccent),
+                ),
+              ])),
+            ),
+          if (rows.isEmpty)
+            Padding(padding: const EdgeInsets.symmetric(vertical: 20), child: Text('No warm-up exercises yet. Add your first one.', textAlign: TextAlign.center, style: ts(14, c: P.mu))),
+          gbtn('Add warm-up exercise', () => add(c, rows.length), i: Icons.add_rounded),
+        ]),
+      );
+}
+
+class WarmupPage extends StatefulWidget {
+  final String? name;
+  final Rows items;
+  const WarmupPage({super.key, this.name, this.items = const []});
+  @override
+  State<WarmupPage> createState() => _WU();
+}
+
+class _WU extends State<WarmupPage> {
+  Rows ex = [];
+  bool ready = false, running = true;
+  int i = 0, left = 0;
+  Timer? t;
+
+  @override
+  void initState() {
+    super.initState();
+    init();
+  }
+
+  Future<void> init() async {
+    final w = await warmList();
+    if (!mounted) return;
+    ex = w;
+    ready = true;
+    begin();
+  }
+
+  @override
+  void dispose() {
+    t?.cancel();
+    super.dispose();
+  }
+
+  bool get timed => i < ex.length && ex[i]['kind'] == 'time';
+
+  void begin() {
+    t?.cancel();
+    running = true;
+    if (i < ex.length) {
+      left = ex[i]['amt'] as int;
+      if (timed) {
+        t = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (!running || !mounted) return;
+          left--;
+          if (left <= 0) {
+            HapticFeedback.mediumImpact();
+            next();
+          } else {
+            setState(() {});
+          }
+        });
+      }
+    }
+    setState(() {});
+  }
+
+  void next() {
+    i++;
+    begin();
+  }
+
+  void finish() {
+    if (widget.name != null) {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => WorkoutPage(widget.name!, widget.items)));
+    } else {
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Widget body;
+    if (!ready) {
+      body = const Center(child: CircularProgressIndicator(color: kG1));
+    } else if (ex.isEmpty) {
+      body = ListView(children: [
+        const SizedBox(height: 40),
+        Center(child: gicon(Icons.self_improvement_rounded, size: 64)),
+        const SizedBox(height: 14),
+        Text('Your warm-up is empty', textAlign: TextAlign.center, style: ts(22, w: FontWeight.w800)),
+        const SizedBox(height: 6),
+        Text('Add the exercises you want to do before training.', textAlign: TextAlign.center, style: ts(14, c: P.mu)),
+        const SizedBox(height: 24),
+        gbtn('Edit warm-up', () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => sub('Warm-up', const WarmupEditor()))), i: Icons.edit_rounded),
+        if (widget.name != null) sbtn('Skip to workout', finish, i: Icons.arrow_forward_rounded),
+      ]);
+    } else if (i >= ex.length) {
+      body = ListView(children: [
+        const SizedBox(height: 40),
+        Center(child: gicon(Icons.check_circle_rounded, size: 84)),
+        const SizedBox(height: 14),
+        Text('Warm-up complete', textAlign: TextAlign.center, style: ts(26, w: FontWeight.w900)),
+        const SizedBox(height: 6),
+        Text(widget.name != null ? 'You are ready for ${widget.name}.' : 'Nice work. Your body is ready.', textAlign: TextAlign.center, style: ts(14, c: P.mu)),
+        const SizedBox(height: 28),
+        gbtn(widget.name != null ? 'Start ${widget.name}' : 'Done', finish, i: widget.name != null ? Icons.play_arrow_rounded : Icons.check_rounded),
+        sbtn('Repeat warm-up', () {
+          i = 0;
+          begin();
+        }, i: Icons.replay_rounded),
+      ]);
+    } else {
+      final cur = ex[i];
+      final amt = cur['amt'] as int;
+      body = ListView(children: [
+        Text('EXERCISE ${i + 1} OF ${ex.length}', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
+        const SizedBox(height: 8),
+        gbar(i / ex.length, h: 8),
+        const SizedBox(height: 28),
+        Center(
+          child: SizedBox(
+            width: 250,
+            height: 250,
+            child: Stack(alignment: Alignment.center, children: [
+              CustomPaint(size: const Size(250, 250), painter: RingPainter(timed ? left / amt : 1.0, w: 14)),
+              Column(mainAxisSize: MainAxisSize.min, children: [
+                Text(timed ? fmt(left) : '$amt', style: ts(timed ? 58 : 72, w: FontWeight.w900)),
+                Text(timed ? (running ? 'seconds left' : 'paused') : 'reps', style: ts(14, c: P.mu)),
+              ]),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text('${cur['name']}', textAlign: TextAlign.center, style: ts(28, w: FontWeight.w900)),
+        const SizedBox(height: 6),
+        Text(i + 1 < ex.length ? 'Next: ${ex[i + 1]['name']}' : 'Last exercise', textAlign: TextAlign.center, style: ts(14, c: P.mu)),
+        const SizedBox(height: 28),
+        Row(children: [
+          Expanded(child: sbtn('Skip', next, i: Icons.skip_next_rounded)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: timed
+                ? gbtn(running ? 'Pause' : 'Resume', () => setState(() => running = !running), i: running ? Icons.pause_rounded : Icons.play_arrow_rounded)
+                : gbtn('Done', next, i: Icons.check_rounded),
+          ),
+        ]),
+      ]);
+    }
+    return bg(Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: Text('Warm-up', style: ts(20, w: FontWeight.w800))),
+      body: Padding(padding: const EdgeInsets.fromLTRB(20, 8, 20, 20), child: body),
+    ));
+  }
 }
 
 // ---------- splash + shell ----------
@@ -694,11 +1080,12 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.3.1', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.3.2', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
                 item(context, Icons.calendar_month_rounded, 'Weekly plan', () => go(1)),
+                item(context, Icons.self_improvement_rounded, 'Warm-up', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Warm-up', const WarmupEditor())))),
                 item(context, Icons.list_alt_rounded, 'My routines', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('My routines', const RoutinesPage())))),
                 item(context, Icons.insights_rounded, 'Progress & results', () => go(2)),
                 item(context, Icons.history_rounded, 'Workout history', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('History', const HistoryPage())))),
@@ -762,12 +1149,13 @@ Widget sessionCard(BuildContext c, int s, Map<String, Object?> plan, Set<Object?
   final nm = plan['name'] as String;
   final isDone = done.contains(nm);
   final it = plan['items'] as Rows;
+  final nSets = it.fold<int>(0, (a, e) => a + (e['sets'] as int));
   return card(
     Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         gicon(s == 0 ? Icons.wb_sunny_rounded : Icons.nights_stay_rounded, size: 18),
         const SizedBox(width: 8),
-        Text('${s == 0 ? 'MORNING' : 'EVENING'} · ${dn[DateTime.now().weekday - 1].toUpperCase()}', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
+        Text('${s == 0 ? 'MORNING' : 'EVENING'} SESSION', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
         const Spacer(),
         if (isDone)
           Container(
@@ -776,12 +1164,18 @@ Widget sessionCard(BuildContext c, int s, Map<String, Object?> plan, Set<Object?
             child: Text('DONE ✓', style: ts(11, w: FontWeight.w900, c: Colors.black)),
           ),
       ]),
-      const SizedBox(height: 6),
-      Text(nm, style: ts(24, w: FontWeight.w900)),
-      const SizedBox(height: 10),
+      const SizedBox(height: 8),
+      Text(nm, style: ts(26, w: FontWeight.w900)),
+      const SizedBox(height: 2),
+      Text('${it.length} exercises · $nSets sets', style: ts(13, c: P.mu)),
+      const SizedBox(height: 12),
       chips(mlist(it).toSet()),
-      const SizedBox(height: 14),
-      gbtn(isDone ? 'Train again' : 'Start $nm', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WorkoutPage(nm, it))), i: Icons.play_arrow_rounded),
+      const SizedBox(height: 16),
+      Row(children: [
+        Expanded(child: pbtn('Warm up', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WarmupPage(name: nm, items: it))), i: Icons.self_improvement_rounded, fill: false)),
+        const SizedBox(width: 10),
+        Expanded(child: pbtn(isDone ? 'Train again' : 'Start', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WorkoutPage(nm, it))), i: Icons.play_arrow_rounded)),
+      ]),
     ]),
     g: P.hero,
   );
@@ -808,11 +1202,28 @@ Widget weekDot(DateTime d, St st, DateTime now) {
 class HomePage extends StatelessWidget {
   final VoidCallback onBackup;
   const HomePage({super.key, required this.onBackup});
+
+  Widget streakPill(IconData ic, int n, String l) => Expanded(
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(20), border: Border.all(color: P.line)),
+          child: Row(children: [
+            gicon(ic, size: 26),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('$n ${n == 1 ? 'day' : 'days'}', style: ts(18, w: FontWeight.w900)),
+              Text(l, style: ts(12, c: P.mu)),
+            ])),
+          ]),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) => Async<List<Object?>>(
         () async {
           final wd = DateTime.now().weekday;
-          return [await St.load(), await DB.kv('name'), int.tryParse(await DB.kv('goal') ?? '') ?? 4, [await planFor(wd, 0), await planFor(wd, 1)], await DB.kv('lastbackup')];
+          return [await St.load(), await DB.kv('name'), int.tryParse(await DB.kv('goal') ?? '') ?? 4, [await planFor(wd, 0), await planFor(wd, 1)], await DB.kv('lastbackup'), await warmList()];
         },
         (c, d) {
           final st = d[0] as St;
@@ -821,27 +1232,33 @@ class HomePage extends StatelessWidget {
           if (goal < 1) goal = 1;
           final plans = d[3] as List<Map<String, Object?>?>;
           final last = DateTime.tryParse((d[4] as String?) ?? '');
+          final warm = d[5] as Rows;
           final now = DateTime.now();
           final mon = DateTime(now.year, now.month, now.day - (now.weekday - 1));
           final ds = st.days(7);
           const wd = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-          final week = ds.where((x) => st.wdays.contains(dk(x))).length;
+          const mn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          final week = [for (var k = 0; k < 7; k++) DateTime(mon.year, mon.month, mon.day + k)].where((x) => st.wdays.contains(dk(x))).length;
           final secs = st.ws.fold<int>(0, (a, e) => a + (e['secs'] as int));
           final ws = st.streak(st.wdays);
           final doneToday = st.ws.where((w) => w['day'] == dk(now)).map((w) => w['routine']).toSet();
           final needBackup = st.ws.length >= 3 && (last == null || now.difference(last).inDays >= 7);
+          final greet = now.hour < 12 ? 'Good morning' : now.hour < 17 ? 'Good afternoon' : 'Good evening';
+          final left = goal - week;
           return ListView(padding: const EdgeInsets.fromLTRB(20, 4, 20, 120), children: [
             ClipRRect(
-              borderRadius: BorderRadius.circular(24),
+              borderRadius: BorderRadius.circular(26),
               child: SizedBox(
-                height: 190,
+                height: 170,
                 child: Stack(fit: StackFit.expand, children: [
                   Image.asset('${img}home_banner.jpg', fit: BoxFit.cover, alignment: Alignment.centerRight),
-                  Container(decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xEE040706), Color(0x00040706)]))),
+                  Container(decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.centerLeft, end: Alignment.centerRight, colors: [Color(0xF2040706), Color(0x99040706), Color(0x00040706)]))),
                   Padding(
-                    padding: const EdgeInsets.all(18),
+                    padding: const EdgeInsets.all(20),
                     child: Column(mainAxisAlignment: MainAxisAlignment.end, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('Welcome back,', style: ts(14, c: const Color(0xFFB7CFC2))),
+                      Text('${dn[now.weekday - 1]}, ${now.day} ${mn[now.month - 1]}'.toUpperCase(), style: ts(11, w: FontWeight.w800, c: kG1, ls: 1.5)),
+                      const SizedBox(height: 4),
+                      Text(greet, style: ts(14, c: const Color(0xFFB7CFC2))),
                       Text(name.isEmpty ? 'Athlete' : name, style: ts(30, w: FontWeight.w900, c: Colors.white)),
                     ]),
                   ),
@@ -849,57 +1266,70 @@ class HomePage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 14),
-            card(Column(children: [
-              Row(children: [for (var i = 0; i < 7; i++) weekDot(DateTime(mon.year, mon.month, mon.day + i), st, now)]),
-            ])),
-            card(Row(children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
-                  width: 96,
-                  height: 96,
-                  child: Stack(children: [
-                    Image.asset('${img}badge.jpg'),
-                    Align(alignment: const Alignment(0, .44), child: Text('$ws DAY', style: ts(9, w: FontWeight.w900, c: kG1))),
-                  ]),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: Column(children: [
-                Row(children: [
-                  gicon(Icons.local_fire_department_rounded),
-                  const SizedBox(width: 8),
-                  Text('$ws', style: ts(26, w: FontWeight.w900)),
-                  const SizedBox(width: 6),
-                  Expanded(child: Text('workout streak', style: ts(14, c: P.mu))),
-                ]),
-                const SizedBox(height: 8),
-                Row(children: [
-                  gicon(Icons.event_available_rounded),
-                  const SizedBox(width: 8),
-                  Text('${st.streak(st.lg)}', style: ts(26, w: FontWeight.w900)),
-                  const SizedBox(width: 6),
-                  Expanded(child: Text('login streak', style: ts(14, c: P.mu))),
-                ]),
-              ])),
-            ])),
             if (plans[0] == null && plans[1] == null)
               card(
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text('TODAY · ${dn[now.weekday - 1].toUpperCase()}', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
-                  const SizedBox(height: 4),
-                  Text('Rest day', style: ts(24, w: FontWeight.w900)),
+                  const SizedBox(height: 6),
+                  Text('Rest day', style: ts(26, w: FontWeight.w900)),
+                  const SizedBox(height: 2),
                   Text('Recovery is part of the plan. Sleep, eat, stretch.', style: ts(14, c: P.mu)),
-                  const SizedBox(height: 14),
-                  gbtn('Train anyway', () => pickRoutine(c), i: Icons.bolt_rounded),
+                  const SizedBox(height: 16),
+                  pbtn('Train anyway', () => pickRoutine(c), i: Icons.bolt_rounded),
                 ]),
                 g: P.hero,
               )
             else ...[
               for (var s = 0; s < 2; s++)
                 if (plans[s] != null) sessionCard(c, s, plans[s]!, doneToday),
-              Center(child: TextButton(onPressed: () => pickRoutine(c), child: Text('Pick a different routine', style: ts(14, c: P.mu)))),
+              Padding(padding: const EdgeInsets.only(bottom: 6), child: Center(child: TextButton(onPressed: () => pickRoutine(c), child: Text('Pick a different routine', style: ts(14, c: P.mu))))),
             ],
+            card(Row(children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(color: P.soft, borderRadius: BorderRadius.circular(16)),
+                child: Center(child: gicon(Icons.self_improvement_rounded, size: 28)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Warm-up', style: ts(16, w: FontWeight.w800)),
+                Text(warm.isEmpty ? 'Add exercises to build your warm-up' : '${warm.length} exercises · about ${(warmSecs(warm) / 60).ceil()} min', style: ts(12, c: P.mu)),
+              ])),
+              if (warm.isNotEmpty)
+                IconButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const WarmupPage())), icon: gicon(Icons.play_circle_fill_rounded, size: 36)),
+              IconButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => sub('Warm-up', const WarmupEditor()))), icon: Icon(Icons.edit_outlined, color: P.mu)),
+            ])),
+            card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                SizedBox(
+                  width: 96,
+                  height: 96,
+                  child: Stack(alignment: Alignment.center, children: [
+                    CustomPaint(size: const Size(96, 96), painter: RingPainter(week / goal, w: 10)),
+                    Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text('$week', style: ts(28, w: FontWeight.w900)),
+                      Text('of $goal', style: ts(11, c: P.mu)),
+                    ]),
+                  ]),
+                ),
+                const SizedBox(width: 16),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Weekly goal', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
+                  const SizedBox(height: 4),
+                  Text(left <= 0 ? 'Goal reached' : '$left more to go', style: ts(20, w: FontWeight.w900)),
+                  const SizedBox(height: 2),
+                  Text(left <= 0 ? 'Great week. Keep the momentum.' : 'Workouts completed this week', style: ts(12, c: P.mu)),
+                ])),
+              ]),
+              const SizedBox(height: 16),
+              Row(children: [for (var i = 0; i < 7; i++) weekDot(DateTime(mon.year, mon.month, mon.day + i), st, now)]),
+            ])),
+            Row(children: [
+              streakPill(Icons.local_fire_department_rounded, ws, 'workout streak'),
+              const SizedBox(width: 10),
+              streakPill(Icons.event_available_rounded, st.streak(st.lg), 'login streak'),
+            ]),
             if (needBackup)
               card(Row(children: [
                 gicon(Icons.cloud_upload_rounded, size: 30),
@@ -910,23 +1340,16 @@ class HomePage extends StatelessWidget {
                 ])),
                 TextButton(onPressed: onBackup, child: Text('Open', style: ts(14, w: FontWeight.w800, c: P.ac))),
               ])),
-            card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                Text('This week', style: ts(16, w: FontWeight.w800)),
-                Text('$week / $goal workouts', style: ts(14, c: P.mu)),
-              ]),
-              const SizedBox(height: 10),
-              gbar(week / goal, h: 10),
-              const SizedBox(height: 18),
-              Text('Minutes per day', style: ts(12, c: P.mu)),
-              const SizedBox(height: 8),
-              SizedBox(height: 130, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final x in ds) st.mins(dk(x))], [for (final x in ds) wd[x.weekday - 1]]))),
-            ])),
             Row(children: [
               tile(Icons.fitness_center, '${st.ws.length}', 'Workouts'),
               tile(Icons.repeat_rounded, '${st.totalReps}', 'Total reps'),
               tile(Icons.timer_outlined, '${(secs / 60).round()}m', 'Time'),
             ]),
+            const SizedBox(height: 14),
+            card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              ttl('Minutes per day', 'last 7 days'),
+              SizedBox(height: 150, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final x in ds) double.parse(st.mins(dk(x)).toStringAsFixed(1))], [for (final x in ds) wd[x.weekday - 1]]))),
+            ])),
           ]);
         },
       );
@@ -1518,6 +1941,17 @@ class StatsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Async<St>(St.load, (c, st) {
         final w7 = st.days(7), d30 = st.days(30), d28 = st.days(28);
+        final nw = DateTime.now();
+        final mon0 = DateTime(nw.year, nw.month, nw.day - (nw.weekday - 1));
+        final weeks = [for (var k = 7; k >= 0; k--) DateTime(mon0.year, mon0.month, mon0.day - 7 * k)];
+        double wcount(DateTime a) {
+          var n = 0;
+          for (var k = 0; k < 7; k++) {
+            if (st.wdays.contains(dk(DateTime(a.year, a.month, a.day + k)))) n++;
+          }
+          return n.toDouble();
+        }
+
         const wd = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
         final m = <String, int>{};
         final best = <String, List<num>>{};
@@ -1550,11 +1984,15 @@ class StatsPage extends StatelessWidget {
           const SizedBox(height: 14),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             ttl('Reps per day', 'last 7 days'),
-            SizedBox(height: 130, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final x in w7) st.reps(dk(x))], [for (final x in w7) wd[x.weekday - 1]]))),
+            SizedBox(height: 160, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final x in w7) st.reps(dk(x))], [for (final x in w7) wd[x.weekday - 1]]))),
           ])),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             ttl('Reps trend', 'last 30 days'),
-            SizedBox(height: 130, width: double.infinity, child: CustomPaint(painter: TrendPainter([for (final x in d30) st.reps(dk(x))]))),
+            SizedBox(height: 170, width: double.infinity, child: CustomPaint(painter: TrendPainter([for (final x in d30) st.reps(dk(x))], l: ['${d30.first.day}/${d30.first.month}', '${d30[15].day}/${d30[15].month}', 'Today']))),
+          ])),
+          card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            ttl('Workout days per week', 'last 8 weeks'),
+            SizedBox(height: 160, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final a in weeks) wcount(a)], [for (final a in weeks) '${a.day}/${a.month}']))),
           ])),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             ttl('Muscles trained', 'share of total sets'),
@@ -1955,7 +2393,7 @@ class _PP extends State<ProfilePage> {
         ]),
         Center(child: TextButton(onPressed: restoreText, child: Text('Restore from copied text (v1.2 backup)', style: ts(12, c: P.mu)))),
       ])),
-      Text('FitTrack v1.3.1 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('FitTrack v1.3.2 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
