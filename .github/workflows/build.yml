@@ -11,7 +11,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -26,5 +26,5 @@ jobs:
           flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
-          name: fittrack-v1.2-apk
+          name: fittrack-v1.3.1-apk
           path: build/app/outputs/flutter-apk/app-release.apk

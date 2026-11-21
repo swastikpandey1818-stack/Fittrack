@@ -2,26 +2,64 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
+import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 
-const kBg = Color(0xFF040706);
-const kCard = Color(0xFF0D1511);
+// ---------- theme / palette ----------
+class P {
+  static bool dark = true;
+  static Color get bg => dark ? const Color(0xFF040706) : const Color(0xFFF1F7F3);
+  static Color get card => dark ? const Color(0xFF0D1511) : Colors.white;
+  static Color get soft => dark ? const Color(0xFF16201B) : const Color(0xFFE4EEE8);
+  static Color get mu => dark ? const Color(0xFF86A194) : const Color(0xFF55705F);
+  static Color get ac => dark ? const Color(0xFF00E676) : const Color(0xFF008F4A);
+  static Color get line => dark ? const Color(0x2200E676) : const Color(0x3300A152);
+  static Color get hdr => dark ? const Color(0xFF0B2A1B) : const Color(0xFFCDEFDC);
+  static Color get nav => dark ? const Color(0xF2111B16) : const Color(0xF2FFFFFF);
+  static LinearGradient get hero => dark
+      ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF14432C), Color(0xFF0D1511)])
+      : const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFFD3F4E1), Colors.white]);
+}
+
 const kG1 = Color(0xFF00E676);
 const kG2 = Color(0xFF00A152);
-const kMu = Color(0xFF86A194);
-const kLine = Color(0x2200E676);
 const kGrad = LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [kG1, kG2]);
 const img = 'assets/images/';
 const dn = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const muscles = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Cardio', 'Other'];
 const mColors = [Color(0xFF00E676), Color(0xFF00BFA5), Color(0xFFB2FF59), Color(0xFF64FFDA), Color(0xFF69F0AE), Color(0xFF76FF03), Color(0xFF1DE9B6), Color(0xFF86A194)];
 final tick = ValueNotifier<int>(0);
+final themeMode = ValueNotifier<ThemeMode>(ThemeMode.dark);
 
 typedef Rows = List<Map<String, Object?>>;
+
+TextStyle ts(double s, {FontWeight w = FontWeight.w400, Color? c, double? ls}) => TextStyle(fontSize: s, fontWeight: w, color: c, letterSpacing: ls);
+
+void applyMode(ThemeMode m) {
+  P.dark = m == ThemeMode.dark || (m == ThemeMode.system && WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark);
+  SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: P.dark ? Brightness.light : Brightness.dark,
+    systemNavigationBarColor: P.bg,
+    systemNavigationBarIconBrightness: P.dark ? Brightness.light : Brightness.dark,
+  ));
+}
+
+Future<void> setTheme(ThemeMode m, {bool save = true}) async {
+  applyMode(m);
+  themeMode.value = m;
+  if (save) await DB.setKv('theme', m == ThemeMode.light ? 'light' : m == ThemeMode.system ? 'system' : 'dark');
+}
+
+Future<void> loadTheme() async {
+  final v = await DB.kv('theme');
+  await setTheme(v == 'light' ? ThemeMode.light : v == 'system' ? ThemeMode.system : ThemeMode.dark, save: false);
+}
 
 String dk(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 String fmt(int s) {
@@ -30,9 +68,19 @@ String fmt(int s) {
   return h > 0 ? '$h:${t(m)}:${t(x)}' : '${t(m)}:${t(x)}';
 }
 
+bool timedName(String n) {
+  final s = n.toLowerCase();
+  return ['plank', 'wall sit', 'dead hang', 'l-sit', 'hold', 'stretch', 'isometric'].any((x) => s.contains(x));
+}
+
+String tf(int s) => s >= 60 ? '${s ~/ 60}m ${s % 60}s' : '${s}s';
+String amtOf(Map<String, Object?> s) => s['kind'] == 'time' ? tf(s['reps'] as int) : '${s['reps']} reps';
+String perSet(Map<String, Object?> m) => m['kind'] == 'time' ? tf(m['reps'] as int) : '${m['reps']} reps';
+
 Color mc(String m) {
   final i = muscles.indexOf(m);
-  return mColors[i < 0 ? 7 : i];
+  final c = mColors[i < 0 ? 7 : i];
+  return P.dark ? c : HSLColor.fromColor(c).withLightness(.3).toColor();
 }
 
 String guess(String n) {
@@ -68,36 +116,55 @@ String cover(List<String> ms) {
 // ---------- database ----------
 class DB {
   static late Database d;
+  static const schedSql = 'CREATE TABLE schedule(day INTEGER, slot INTEGER, rid INTEGER, PRIMARY KEY(day, slot))';
+  static const photoSql = 'CREATE TABLE photos(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, day TEXT, path TEXT, kg REAL, note TEXT)';
 
   static Future<void> init() async {
     d = await openDatabase(
       p.join(await getDatabasesPath(), 'fittrack.db'),
-      version: 2,
+      version: 4,
       onCreate: (db, v) async {
         await db.execute('CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT)');
         await db.execute('CREATE TABLE routines(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
-        await db.execute('CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, name TEXT, sets INTEGER, reps INTEGER, muscle TEXT)');
+        await db.execute('CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, name TEXT, sets INTEGER, reps INTEGER, muscle TEXT, kind TEXT)');
         await db.execute('CREATE TABLE workouts(id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT, ts INTEGER, routine TEXT, secs INTEGER)');
-        await db.execute('CREATE TABLE sets(id INTEGER PRIMARY KEY AUTOINCREMENT, wid INTEGER, ex TEXT, reps INTEGER, kg REAL, muscle TEXT)');
+        await db.execute('CREATE TABLE sets(id INTEGER PRIMARY KEY AUTOINCREMENT, wid INTEGER, ex TEXT, reps INTEGER, kg REAL, muscle TEXT, kind TEXT)');
         await db.execute('CREATE TABLE logins(day TEXT PRIMARY KEY)');
-        await db.execute('CREATE TABLE schedule(day INTEGER PRIMARY KEY, rid INTEGER)');
-        await db.execute('CREATE TABLE photos(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, day TEXT, path TEXT, kg REAL, note TEXT)');
+        await db.execute(schedSql);
+        await db.execute(photoSql);
         await seed(db, fresh: true);
       },
       onUpgrade: (db, o, n) async {
         if (o < 2) {
           await db.execute('ALTER TABLE items ADD COLUMN muscle TEXT');
           await db.execute('ALTER TABLE sets ADD COLUMN muscle TEXT');
-          await db.execute('CREATE TABLE schedule(day INTEGER PRIMARY KEY, rid INTEGER)');
-          await db.execute('CREATE TABLE photos(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, day TEXT, path TEXT, kg REAL, note TEXT)');
+          await db.execute(schedSql);
+          await db.execute(photoSql);
           for (final r in await db.query('items')) {
             await db.update('items', {'muscle': guess(r['name'] as String)}, where: 'id=?', whereArgs: [r['id']]);
           }
           for (final r in await db.query('sets')) {
             await db.update('sets', {'muscle': guess(r['ex'] as String)}, where: 'id=?', whereArgs: [r['id']]);
           }
-          await seed(db, fresh: false);
+        } else if (o < 3) {
+          await db.execute('ALTER TABLE schedule RENAME TO schedule_old');
+          await db.execute(schedSql);
+          await db.execute('INSERT INTO schedule(day, slot, rid) SELECT day, 0, rid FROM schedule_old');
+          await db.execute('DROP TABLE schedule_old');
         }
+        if (o < 4) {
+          await db.execute('ALTER TABLE items ADD COLUMN kind TEXT');
+          await db.execute('ALTER TABLE sets ADD COLUMN kind TEXT');
+          await db.execute("UPDATE items SET kind='time' WHERE lower(name) LIKE '%plank%'");
+          if (o >= 2) {
+            final rs = await db.query('routines', where: 'name=?', whereArgs: ['Core & Cardio']);
+            for (final r in rs) {
+              final has = await db.query('items', where: "rid=? AND lower(name) LIKE '%plank%'", whereArgs: [r['id']]);
+              if (has.isEmpty) await db.insert('items', {'rid': r['id'], 'name': 'Plank', 'sets': 3, 'reps': 45, 'muscle': 'Core', 'kind': 'time'});
+            }
+          }
+        }
+        if (o < 2) await seed(db, fresh: false);
       },
     );
   }
@@ -106,7 +173,7 @@ class DB {
     Future<void> mk(String n, List<List<Object>> it) async {
       final r = await db.insert('routines', {'name': n});
       for (final e in it) {
-        await db.insert('items', {'rid': r, 'name': e[0], 'sets': e[1], 'reps': e[2], 'muscle': e[3]});
+        await db.insert('items', {'rid': r, 'name': e[0], 'sets': e[1], 'reps': e[2], 'muscle': e[3], 'kind': e.length > 4 ? e[4] : 'reps'});
       }
     }
 
@@ -114,11 +181,11 @@ class DB {
     await mk('Chest & Triceps', [['Bench Press', 4, 10, 'Chest'], ['Push-ups', 3, 15, 'Chest'], ['Shoulder Press', 3, 10, 'Shoulders'], ['Tricep Dips', 3, 12, 'Arms']]);
     await mk('Back & Biceps', [['Pull-ups', 3, 8, 'Back'], ['Barbell Row', 4, 10, 'Back'], ['Deadlift', 3, 6, 'Back'], ['Bicep Curls', 3, 12, 'Arms']]);
     await mk('Leg Day', [['Squats', 4, 12, 'Legs'], ['Lunges', 3, 12, 'Legs'], ['Leg Press', 3, 12, 'Legs'], ['Calf Raises', 4, 15, 'Legs']]);
-    await mk('Core & Cardio', [['Crunches', 3, 20, 'Core'], ['Leg Raises', 3, 15, 'Core'], ['Burpees', 3, 10, 'Cardio'], ['Mountain Climbers', 3, 30, 'Cardio']]);
+    await mk('Core & Cardio', [['Crunches', 3, 20, 'Core'], ['Plank', 3, 45, 'Core', 'time'], ['Leg Raises', 3, 15, 'Core'], ['Burpees', 3, 10, 'Cardio'], ['Mountain Climbers', 3, 30, 'Cardio']]);
     final ids = {for (final r in await db.query('routines')) r['name'] as String: r['id'] as int};
     const plan = {1: 'Chest & Triceps', 2: 'Back & Biceps', 3: 'Leg Day', 4: 'Core & Cardio', 5: 'Full Body'};
     for (var d = 1; d <= 7; d++) {
-      await db.insert('schedule', {'day': d, 'rid': ids[plan[d]] ?? 0}, conflictAlgorithm: ConflictAlgorithm.replace);
+      await db.insert('schedule', {'day': d, 'slot': 0, 'rid': ids[plan[d]] ?? 0}, conflictAlgorithm: ConflictAlgorithm.replace);
     }
   }
 
@@ -132,8 +199,8 @@ class DB {
   }
 }
 
-Future<Map<String, Object?>?> planFor(int wd) async {
-  final s = await DB.d.query('schedule', where: 'day=?', whereArgs: [wd]);
+Future<Map<String, Object?>?> planFor(int wd, int slot) async {
+  final s = await DB.d.query('schedule', where: 'day=? AND slot=?', whereArgs: [wd, slot]);
   if (s.isEmpty || (s.first['rid'] as int) == 0) return null;
   final rid = s.first['rid'] as int;
   final r = await DB.d.query('routines', where: 'id=?', whereArgs: [rid]);
@@ -148,7 +215,7 @@ class St {
   St(this.ws, this.ss, this.lg);
   static Future<St> load() async => St(
         await DB.d.query('workouts', orderBy: 'ts DESC'),
-        await DB.d.rawQuery('SELECT s.wid, s.ex, s.reps, s.kg, s.muscle, w.day FROM sets s JOIN workouts w ON w.id=s.wid'),
+        await DB.d.rawQuery('SELECT s.wid, s.ex, s.reps, s.kg, s.muscle, s.kind, w.day FROM sets s JOIN workouts w ON w.id=s.wid'),
         (await DB.d.query('logins')).map((e) => e['day'] as String).toSet(),
       );
   Set<String> get wdays => ws.map((e) => e['day'] as String).toSet();
@@ -169,89 +236,137 @@ class St {
   }
 
   double mins(String d) => ws.where((e) => e['day'] == d).fold<double>(0, (a, e) => a + (e['secs'] as int) / 60);
-  double reps(String d) => ss.where((e) => e['day'] == d).fold<double>(0, (a, e) => a + (e['reps'] as int));
-  int get totalReps => ss.fold<int>(0, (a, e) => a + (e['reps'] as int));
+  double reps(String d) => ss.where((e) => e['day'] == d && e['kind'] != 'time').fold<double>(0, (a, e) => a + (e['reps'] as int));
+  int get totalReps => ss.where((e) => e['kind'] != 'time').fold<int>(0, (a, e) => a + (e['reps'] as int));
   Map<String, int> byMuscle() {
     final m = <String, int>{};
     for (final s in ss) {
       final k = (s['muscle'] as String?) ?? guess(s['ex'] as String);
-      m[k] = (m[k] ?? 0) + (s['reps'] as int);
+      m[k] = (m[k] ?? 0) + 1;
     }
     return m;
   }
 }
 
+// ---------- backup (data + photos in one file) ----------
 const bkTables = ['kv', 'routines', 'items', 'workouts', 'sets', 'logins', 'schedule'];
 
-Future<String> exportBackup() async {
-  final o = <String, Object?>{'app': 'fittrack', 'v': 2};
+Future<String> buildBackup() async {
+  final o = <String, Object?>{'app': 'fittrack', 'v': 3};
   for (final t in bkTables) {
     o[t] = await DB.d.query(t);
   }
+  final ph = <Map<String, Object?>>[];
+  for (final r in await DB.d.query('photos')) {
+    final m = Map<String, Object?>.from(r);
+    try {
+      m['b64'] = base64Encode(await File(m['path'] as String).readAsBytes());
+    } catch (_) {
+      continue;
+    }
+    m.remove('path');
+    m.remove('id');
+    ph.add(m);
+  }
+  o['photos'] = ph;
   return jsonEncode(o);
 }
 
 Future<String?> importBackup(String s) async {
   try {
     final o = jsonDecode(s) as Map<String, dynamic>;
-    if (o['app'] != 'fittrack') return 'That text is not a FitTrack backup.';
+    if (o['app'] != 'fittrack') return 'That is not a FitTrack backup.';
+    final dir = Directory(p.join(await getDatabasesPath(), 'photos'));
+    await dir.create(recursive: true);
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final rows = <Map<String, Object?>>[];
+    var n = 0;
+    for (final r in (o['photos'] as List? ?? [])) {
+      final m = Map<String, Object?>.from(r as Map);
+      final path = p.join(dir.path, 'r${stamp}_${n++}.jpg');
+      await File(path).writeAsBytes(base64Decode(m.remove('b64') as String));
+      m['path'] = path;
+      rows.add(m);
+    }
+    final old = await DB.d.query('photos');
     await DB.d.transaction((tx) async {
       for (final t in bkTables) {
         await tx.delete(t);
         for (final r in (o[t] as List)) {
-          await tx.insert(t, Map<String, Object?>.from(r as Map));
+          final m = Map<String, Object?>.from(r as Map);
+          if (t == 'schedule') m.putIfAbsent('slot', () => 0);
+          await tx.insert(t, m);
         }
       }
+      await tx.delete('photos');
+      for (final m in rows) {
+        await tx.insert('photos', m);
+      }
     });
+    for (final r in old) {
+      try {
+        await File(r['path'] as String).delete();
+      } catch (_) {}
+    }
+    await loadTheme();
     tick.value++;
     return null;
   } catch (e) {
-    return 'Could not read that backup text. Copy it again and retry.';
+    return 'Could not read that backup file.';
   }
 }
 
+// ---------- app ----------
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await DB.init();
   await DB.d.insert('logins', {'day': dk(DateTime.now())}, conflictAlgorithm: ConflictAlgorithm.ignore);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: Colors.transparent, systemNavigationBarColor: kBg));
+  await loadTheme();
   runApp(const App());
 }
+
+ThemeData mkTheme(bool d) => ThemeData(
+      useMaterial3: true,
+      brightness: d ? Brightness.dark : Brightness.light,
+      scaffoldBackgroundColor: d ? const Color(0xFF040706) : const Color(0xFFF1F7F3),
+      colorScheme: d ? const ColorScheme.dark(primary: kG1, secondary: kG2, surface: Color(0xFF0D1511)) : const ColorScheme.light(primary: Color(0xFF008F4A), secondary: kG2, surface: Colors.white),
+    );
 
 class App extends StatelessWidget {
   const App({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'FitTrack',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          useMaterial3: true,
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: kBg,
-          colorScheme: const ColorScheme.dark(primary: kG1, secondary: kG2, surface: kCard),
-        ),
-        home: const Splash(),
+  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
+        valueListenable: themeMode,
+        builder: (_, m, __) => MaterialApp(title: 'FitTrack', debugShowCheckedModeBanner: false, themeMode: m, theme: mkTheme(false), darkTheme: mkTheme(true), home: const Splash()),
       );
 }
 
 // ---------- shared widgets ----------
 Widget bg(Widget child) => Container(
-      decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF0B2A1B), kBg], stops: [0, .5])),
+      decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [P.hdr, P.bg], stops: const [0, .5])),
       child: child,
     );
 
 Widget sub(String t, Widget w) => bg(Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: AppBar(backgroundColor: Colors.transparent, title: Text(t, style: const TextStyle(fontWeight: FontWeight.w800))),
+      appBar: AppBar(backgroundColor: Colors.transparent, title: Text(t, style: ts(20, w: FontWeight.w800))),
       body: w,
     ));
 
 Widget card(Widget child, {Gradient? g}) => Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
       margin: const EdgeInsets.only(bottom: 14),
-      decoration: BoxDecoration(gradient: g, color: g == null ? kCard : null, borderRadius: BorderRadius.circular(22), border: Border.all(color: kLine)),
-      child: child,
+      padding: const EdgeInsets.all(1.2),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0x9900E676), Color(0x1A00E676), Color(0x5500A152)]),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: P.dark ? null : const [BoxShadow(color: Color(0x1A00A152), blurRadius: 18, offset: Offset(0, 6))],
+      ),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(gradient: g, color: g == null ? P.card : null, borderRadius: BorderRadius.circular(23)),
+        child: child,
+      ),
     );
 
 Widget gbtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
@@ -263,8 +378,34 @@ Widget gbtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
         decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(18), boxShadow: const [BoxShadow(color: Color(0x5500E676), blurRadius: 18, offset: Offset(0, 6))]),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (i != null) ...[Icon(i, color: Colors.black), const SizedBox(width: 8)],
-          Text(t, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w800, fontSize: 16)),
+          Text(t, style: ts(16, w: FontWeight.w800, c: Colors.black)),
         ]),
+      ),
+    );
+
+Widget sbtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
+      onTap: f,
+      child: Container(
+        height: 54,
+        alignment: Alignment.center,
+        margin: const EdgeInsets.only(bottom: 14),
+        decoration: BoxDecoration(color: P.soft, borderRadius: BorderRadius.circular(18), border: Border.all(color: kG1.withOpacity(.6))),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (i != null) ...[Icon(i, color: P.ac), const SizedBox(width: 8)],
+          Text(t, style: ts(16, w: FontWeight.w800, c: P.ac)),
+        ]),
+      ),
+    );
+
+Widget gicon(IconData i, {double size = 24}) => ShaderMask(shaderCallback: (r) => kGrad.createShader(r), child: Icon(i, size: size, color: Colors.white));
+
+Widget gbar(double v, {double h = 8}) => ClipRRect(
+      borderRadius: BorderRadius.circular(h),
+      child: Container(
+        height: h,
+        color: P.soft,
+        alignment: Alignment.centerLeft,
+        child: FractionallySizedBox(widthFactor: v.clamp(0.0, 1.0).toDouble(), child: Container(decoration: const BoxDecoration(gradient: kGrad))),
       ),
     );
 
@@ -272,12 +413,12 @@ Widget tile(IconData i, String v, String l) => Expanded(
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         margin: const EdgeInsets.symmetric(horizontal: 4),
-        decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(18), border: Border.all(color: kLine)),
+        decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(20), border: Border.all(color: P.line), boxShadow: P.dark ? null : const [BoxShadow(color: Color(0x1A00A152), blurRadius: 14, offset: Offset(0, 5))]),
         child: Column(children: [
-          Icon(i, color: kG1),
+          gicon(i),
           const SizedBox(height: 6),
-          Text(v, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-          Text(l, style: const TextStyle(color: kMu, fontSize: 12), textAlign: TextAlign.center),
+          Text(v, style: ts(20, w: FontWeight.w800)),
+          Text(l, style: ts(12, c: P.mu), textAlign: TextAlign.center),
         ]),
       ),
     );
@@ -287,15 +428,21 @@ Widget chips(Iterable<String> ms) => Wrap(spacing: 6, runSpacing: 6, children: [
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(color: mc(m).withOpacity(.15), borderRadius: BorderRadius.circular(20), border: Border.all(color: mc(m).withOpacity(.5))),
-          child: Text(m, style: TextStyle(color: mc(m), fontSize: 12, fontWeight: FontWeight.w700)),
+          child: Text(m, style: ts(12, w: FontWeight.w700, c: mc(m))),
         ),
     ]);
 
 Widget ttl(String t, [String? s]) => Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(t, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-        if (s != null) Text(s, style: const TextStyle(color: kMu, fontSize: 12)),
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(children: [
+        Container(width: 4, height: s == null ? 18 : 32, decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(4))),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(t, style: ts(16, w: FontWeight.w800)),
+            if (s != null) Text(s, style: ts(12, c: P.mu)),
+          ]),
+        ),
       ]),
     );
 
@@ -310,12 +457,14 @@ class Async<T> extends StatelessWidget {
       );
 }
 
+InputDecoration fld(String l) => InputDecoration(labelText: l, filled: true, fillColor: P.soft, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none));
+
 Future<String?> ask(BuildContext c, String t, {String hint = '', bool numeric = false}) {
   final ctl = TextEditingController();
   return showDialog<String>(
     context: c,
     builder: (d) => AlertDialog(
-      backgroundColor: kCard,
+      backgroundColor: P.card,
       title: Text(t),
       content: TextField(controller: ctl, autofocus: true, keyboardType: numeric ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text, decoration: InputDecoration(hintText: hint)),
       actions: [
@@ -328,22 +477,44 @@ Future<String?> ask(BuildContext c, String t, {String hint = '', bool numeric = 
 
 Future<List<String>?> askItem(BuildContext c) {
   final n = TextEditingController(), s = TextEditingController(text: '3'), r = TextEditingController(text: '12');
-  var m = 'Other';
+  var m = 'Other', timed = false, touched = false;
   return showDialog<List<String>>(
     context: c,
     builder: (d) => StatefulBuilder(
       builder: (d, set) => AlertDialog(
-        backgroundColor: kCard,
+        backgroundColor: P.card,
         title: const Text('Add exercise'),
         content: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(controller: n, autofocus: true, decoration: const InputDecoration(labelText: 'Exercise name')),
+            TextField(
+              controller: n,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Exercise name'),
+              onChanged: (v) {
+                if (!touched) {
+                  set(() {
+                    timed = timedName(v);
+                    r.text = timed ? '45' : '12';
+                  });
+                }
+              },
+            ),
             TextField(controller: s, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sets')),
-            TextField(controller: r, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Reps')),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Timed hold (plank, wall sit…)'),
+              value: timed,
+              onChanged: (v) => set(() {
+                touched = true;
+                timed = v;
+                r.text = v ? '45' : '12';
+              }),
+            ),
+            TextField(controller: r, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: timed ? 'Seconds per set' : 'Reps per set')),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               value: m,
-              dropdownColor: kCard,
+              dropdownColor: P.card,
               decoration: const InputDecoration(labelText: 'Muscle (Other = auto-detect)'),
               items: [for (final x in muscles) DropdownMenuItem(value: x, child: Text(x))],
               onChanged: (v) => set(() => m = v ?? 'Other'),
@@ -352,7 +523,7 @@ Future<List<String>?> askItem(BuildContext c) {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(d, [n.text.trim(), s.text, r.text, m == 'Other' ? guess(n.text) : m]), child: const Text('Add')),
+          TextButton(onPressed: () => Navigator.pop(d, [n.text.trim(), s.text, r.text, m == 'Other' ? guess(n.text) : m, timed ? 'time' : 'reps']), child: const Text('Add')),
         ],
       ),
     ),
@@ -376,10 +547,10 @@ class BarsPainter extends CustomPainter {
       if (v[i] > 0) {
         paint.shader = kGrad.createShader(r.outerRect);
       } else {
-        paint.color = kLine;
+        paint.color = P.line;
       }
       c.drawRRect(r, paint);
-      final tp = TextPainter(text: TextSpan(text: l[i], style: const TextStyle(color: kMu, fontSize: 11)), textDirection: TextDirection.ltr)..layout();
+      final tp = TextPainter(text: TextSpan(text: l[i], style: TextStyle(color: P.mu, fontSize: 11)), textDirection: TextDirection.ltr)..layout();
       tp.paint(c, Offset(i * w + (w - tp.width) / 2, s.height - 16));
     }
   }
@@ -410,7 +581,7 @@ class TrendPainter extends CustomPainter {
       ..lineTo(0, s.height)
       ..close();
     c.drawPath(fill, Paint()..shader = const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x6600E676), Color(0x0000E676)]).createShader(Rect.fromLTWH(0, 0, s.width, s.height)));
-    c.drawPath(path, Paint()..color = kG1..style = PaintingStyle.stroke..strokeWidth = 3..strokeJoin = StrokeJoin.round);
+    c.drawPath(path, Paint()..shader = kGrad.createShader(Rect.fromLTWH(0, 0, s.width, s.height))..style = PaintingStyle.stroke..strokeWidth = 3.5..strokeJoin = StrokeJoin.round);
   }
 
   @override
@@ -457,14 +628,15 @@ class _SplashState extends State<Splash> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+        backgroundColor: Colors.black,
         body: Stack(fit: StackFit.expand, children: [
           Image.asset('${img}splash.jpg', fit: BoxFit.cover),
           Align(
             alignment: const Alignment(0, .72),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              ShaderMask(shaderCallback: (r) => kGrad.createShader(r), child: const Text('FITTRACK', style: TextStyle(fontSize: 38, fontWeight: FontWeight.w900, letterSpacing: 6, color: Colors.white))),
+              ShaderMask(shaderCallback: (r) => kGrad.createShader(r), child: Text('FITTRACK', style: ts(38, w: FontWeight.w900, c: Colors.white, ls: 6))),
               const SizedBox(height: 6),
-              const Text('Train. Track. Transform.', style: TextStyle(color: kMu, letterSpacing: 1.5)),
+              Text('Train. Track. Transform.', style: ts(14, c: const Color(0xFF86A194), ls: 1.5)),
             ]),
           ),
         ]),
@@ -490,55 +662,62 @@ class _ShellState extends State<Shell> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(gradient: on ? kGrad : null, shape: BoxShape.circle),
-        child: Icon(ic[k], color: on ? Colors.black : kMu),
+        decoration: BoxDecoration(gradient: on ? kGrad : null, shape: BoxShape.circle, boxShadow: on ? const [BoxShadow(color: Color(0x6600E676), blurRadius: 14)] : null),
+        child: Icon(ic[k], color: on ? Colors.black : P.mu),
       ),
     );
   }
 
-  Widget item(BuildContext c, IconData ic, String t, VoidCallback f) => ListTile(leading: Icon(ic, color: kG1), title: Text(t), onTap: () {
-        Navigator.pop(c);
-        f();
-      });
+  Widget item(BuildContext c, IconData ic, String t, VoidCallback f) => ListTile(
+        leading: gicon(ic),
+        title: Text(t),
+        onTap: () {
+          Navigator.pop(c);
+          f();
+        },
+      );
 
   @override
-  Widget build(BuildContext context) {
-    const pages = [HomePage(), WeekPage(), StatsPage(), TransformPage(), ProfilePage()];
-    return bg(Scaffold(
-      backgroundColor: Colors.transparent,
-      extendBody: true,
-      appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, title: Text(titles[i], style: const TextStyle(fontWeight: FontWeight.w800))),
-      drawer: Drawer(
-        backgroundColor: kBg,
-        child: ListView(padding: EdgeInsets.zero, children: [
-          SizedBox(
-            height: 170,
-            child: Stack(fit: StackFit.expand, children: [
-              Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
-              Container(decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x00040706), kBg]))),
-              const Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.2', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900))),
-            ]),
-          ),
-          item(context, Icons.home_rounded, 'Home', () => go(0)),
-          item(context, Icons.calendar_month_rounded, 'Weekly plan', () => go(1)),
-          item(context, Icons.list_alt_rounded, 'My routines', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('My routines', const RoutinesPage())))),
-          item(context, Icons.insights_rounded, 'Progress & results', () => go(2)),
-          item(context, Icons.history_rounded, 'Workout history', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('History', const HistoryPage())))),
-          item(context, Icons.photo_camera_rounded, 'Transformation', () => go(3)),
-          item(context, Icons.person_rounded, 'Profile', () => go(4)),
-        ]),
-      ),
-      body: pages[i],
-      bottomNavigationBar: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
-        child: Container(
-          height: 70,
-          decoration: BoxDecoration(color: const Color(0xF2111B16), borderRadius: BorderRadius.circular(35), border: Border.all(color: const Color(0x4000E676)), boxShadow: const [BoxShadow(color: Color(0x3000E676), blurRadius: 26)]),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [for (var k = 0; k < 5; k++) nav(k)]),
-        ),
-      ),
-    ));
-  }
+  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
+        valueListenable: themeMode,
+        builder: (context, _, __) {
+          final pages = [HomePage(onBackup: () => go(4)), const WeekPage(), const StatsPage(), const TransformPage(), const ProfilePage()];
+          return bg(Scaffold(
+            backgroundColor: Colors.transparent,
+            extendBody: true,
+            appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, title: Text(titles[i], style: ts(20, w: FontWeight.w800))),
+            drawer: Drawer(
+              backgroundColor: P.bg,
+              child: ListView(padding: EdgeInsets.zero, children: [
+                SizedBox(
+                  height: 170,
+                  child: Stack(fit: StackFit.expand, children: [
+                    Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
+                    Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
+                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.3.1', style: ts(20, w: FontWeight.w900))),
+                  ]),
+                ),
+                item(context, Icons.home_rounded, 'Home', () => go(0)),
+                item(context, Icons.calendar_month_rounded, 'Weekly plan', () => go(1)),
+                item(context, Icons.list_alt_rounded, 'My routines', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('My routines', const RoutinesPage())))),
+                item(context, Icons.insights_rounded, 'Progress & results', () => go(2)),
+                item(context, Icons.history_rounded, 'Workout history', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('History', const HistoryPage())))),
+                item(context, Icons.photo_camera_rounded, 'Transformation', () => go(3)),
+                item(context, Icons.person_rounded, 'Profile & backup', () => go(4)),
+              ]),
+            ),
+            body: pages[i],
+            bottomNavigationBar: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+              child: Container(
+                height: 70,
+                decoration: BoxDecoration(color: P.nav, borderRadius: BorderRadius.circular(35), border: Border.all(color: const Color(0x5500E676)), boxShadow: const [BoxShadow(color: Color(0x3300E676), blurRadius: 26)]),
+                child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [for (var k = 0; k < 5; k++) nav(k)]),
+              ),
+            ),
+          ));
+        },
+      );
 }
 
 // ---------- home ----------
@@ -548,17 +727,17 @@ Future<void> pickRoutine(BuildContext c) async {
   showModalBottomSheet(
     context: c,
     isScrollControlled: true,
-    backgroundColor: kCard,
+    backgroundColor: P.card,
     shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
     builder: (b) => SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Choose routine', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+        Text('Choose routine', style: ts(20, w: FontWeight.w800)),
         const SizedBox(height: 8),
         for (final r in rs)
           ListTile(
             title: Text(r['name'] as String),
-            trailing: const Icon(Icons.chevron_right, color: kG1),
+            trailing: gicon(Icons.chevron_right),
             onTap: () async {
               final it = await DB.d.query('items', where: 'rid=?', whereArgs: [r['id']]);
               if (!c.mounted) return;
@@ -568,7 +747,7 @@ Future<void> pickRoutine(BuildContext c) async {
           ),
         ListTile(
           title: const Text('Quick workout (add as you go)'),
-          trailing: const Icon(Icons.bolt, color: kG1),
+          trailing: gicon(Icons.bolt),
           onTap: () {
             Navigator.pop(b);
             Navigator.push(c, MaterialPageRoute(builder: (_) => const WorkoutPage('Quick workout', [])));
@@ -579,22 +758,78 @@ Future<void> pickRoutine(BuildContext c) async {
   );
 }
 
+Widget sessionCard(BuildContext c, int s, Map<String, Object?> plan, Set<Object?> done) {
+  final nm = plan['name'] as String;
+  final isDone = done.contains(nm);
+  final it = plan['items'] as Rows;
+  return card(
+    Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        gicon(s == 0 ? Icons.wb_sunny_rounded : Icons.nights_stay_rounded, size: 18),
+        const SizedBox(width: 8),
+        Text('${s == 0 ? 'MORNING' : 'EVENING'} · ${dn[DateTime.now().weekday - 1].toUpperCase()}', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
+        const Spacer(),
+        if (isDone)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+            decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(20)),
+            child: Text('DONE ✓', style: ts(11, w: FontWeight.w900, c: Colors.black)),
+          ),
+      ]),
+      const SizedBox(height: 6),
+      Text(nm, style: ts(24, w: FontWeight.w900)),
+      const SizedBox(height: 10),
+      chips(mlist(it).toSet()),
+      const SizedBox(height: 14),
+      gbtn(isDone ? 'Train again' : 'Start $nm', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WorkoutPage(nm, it))), i: Icons.play_arrow_rounded),
+    ]),
+    g: P.hero,
+  );
+}
+
+Widget weekDot(DateTime d, St st, DateTime now) {
+  final done = st.wdays.contains(dk(d));
+  final today = dk(d) == dk(now);
+  return Expanded(
+    child: Column(children: [
+      Text(['M', 'T', 'W', 'T', 'F', 'S', 'S'][d.weekday - 1], style: ts(11, c: P.mu)),
+      const SizedBox(height: 6),
+      Container(
+        width: 36,
+        height: 36,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(gradient: done ? kGrad : null, color: done ? null : P.soft, shape: BoxShape.circle, border: today ? Border.all(color: kG1, width: 2) : null),
+        child: done ? const Icon(Icons.check_rounded, size: 20, color: Colors.black) : Text('${d.day}', style: ts(12, c: P.mu)),
+      ),
+    ]),
+  );
+}
+
 class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+  final VoidCallback onBackup;
+  const HomePage({super.key, required this.onBackup});
   @override
   Widget build(BuildContext context) => Async<List<Object?>>(
-        () async => [await St.load(), await DB.kv('name'), int.tryParse(await DB.kv('goal') ?? '') ?? 4, await planFor(DateTime.now().weekday)],
+        () async {
+          final wd = DateTime.now().weekday;
+          return [await St.load(), await DB.kv('name'), int.tryParse(await DB.kv('goal') ?? '') ?? 4, [await planFor(wd, 0), await planFor(wd, 1)], await DB.kv('lastbackup')];
+        },
         (c, d) {
           final st = d[0] as St;
           final name = ((d[1] as String?) ?? '').trim();
           var goal = d[2] as int;
           if (goal < 1) goal = 1;
-          final plan = d[3] as Map<String, Object?>?;
+          final plans = d[3] as List<Map<String, Object?>?>;
+          final last = DateTime.tryParse((d[4] as String?) ?? '');
+          final now = DateTime.now();
+          final mon = DateTime(now.year, now.month, now.day - (now.weekday - 1));
           final ds = st.days(7);
           const wd = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
           final week = ds.where((x) => st.wdays.contains(dk(x))).length;
           final secs = st.ws.fold<int>(0, (a, e) => a + (e['secs'] as int));
           final ws = st.streak(st.wdays);
+          final doneToday = st.ws.where((w) => w['day'] == dk(now)).map((w) => w['routine']).toSet();
+          final needBackup = st.ws.length >= 3 && (last == null || now.difference(last).inDays >= 7);
           return ListView(padding: const EdgeInsets.fromLTRB(20, 4, 20, 120), children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(24),
@@ -606,14 +841,17 @@ class HomePage extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.all(18),
                     child: Column(mainAxisAlignment: MainAxisAlignment.end, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      const Text('Welcome back,', style: TextStyle(color: kMu)),
-                      Text(name.isEmpty ? 'Athlete' : name, style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+                      Text('Welcome back,', style: ts(14, c: const Color(0xFFB7CFC2))),
+                      Text(name.isEmpty ? 'Athlete' : name, style: ts(30, w: FontWeight.w900, c: Colors.white)),
                     ]),
                   ),
                 ]),
               ),
             ),
             const SizedBox(height: 14),
+            card(Column(children: [
+              Row(children: [for (var i = 0; i < 7; i++) weekDot(DateTime(mon.year, mon.month, mon.day + i), st, now)]),
+            ])),
             card(Row(children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(16),
@@ -622,60 +860,65 @@ class HomePage extends StatelessWidget {
                   height: 96,
                   child: Stack(children: [
                     Image.asset('${img}badge.jpg'),
-                    Align(alignment: const Alignment(0, .44), child: Text('$ws DAY', style: const TextStyle(color: kG1, fontSize: 9, fontWeight: FontWeight.w900))),
+                    Align(alignment: const Alignment(0, .44), child: Text('$ws DAY', style: ts(9, w: FontWeight.w900, c: kG1))),
                   ]),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(child: Column(children: [
                 Row(children: [
-                  const Icon(Icons.local_fire_department_rounded, color: kG1),
+                  gicon(Icons.local_fire_department_rounded),
                   const SizedBox(width: 8),
-                  Text('$ws', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+                  Text('$ws', style: ts(26, w: FontWeight.w900)),
                   const SizedBox(width: 6),
-                  const Expanded(child: Text('workout streak', style: TextStyle(color: kMu))),
+                  Expanded(child: Text('workout streak', style: ts(14, c: P.mu))),
                 ]),
                 const SizedBox(height: 8),
                 Row(children: [
-                  const Icon(Icons.event_available_rounded, color: kG1),
+                  gicon(Icons.event_available_rounded),
                   const SizedBox(width: 8),
-                  Text('${st.streak(st.lg)}', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+                  Text('${st.streak(st.lg)}', style: ts(26, w: FontWeight.w900)),
                   const SizedBox(width: 6),
-                  const Expanded(child: Text('login streak', style: TextStyle(color: kMu))),
+                  Expanded(child: Text('login streak', style: ts(14, c: P.mu))),
                 ]),
               ])),
             ])),
-            if (plan != null)
+            if (plans[0] == null && plans[1] == null)
               card(
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('TODAY · ${dn[DateTime.now().weekday - 1].toUpperCase()}', style: const TextStyle(color: kG1, fontWeight: FontWeight.w800, letterSpacing: 1.5, fontSize: 12)),
+                  Text('TODAY · ${dn[now.weekday - 1].toUpperCase()}', style: ts(12, w: FontWeight.w800, c: P.ac, ls: 1.5)),
                   const SizedBox(height: 4),
-                  Text('${plan['name']}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 10),
-                  chips(mlist(plan['items'] as Rows).toSet()),
+                  Text('Rest day', style: ts(24, w: FontWeight.w900)),
+                  Text('Recovery is part of the plan. Sleep, eat, stretch.', style: ts(14, c: P.mu)),
                   const SizedBox(height: 14),
-                  gbtn('Start ${plan['name']}', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WorkoutPage(plan['name'] as String, plan['items'] as Rows))), i: Icons.play_arrow_rounded),
-                  Center(child: TextButton(onPressed: () => pickRoutine(c), child: const Text('Pick another routine', style: TextStyle(color: kMu)))),
+                  gbtn('Train anyway', () => pickRoutine(c), i: Icons.bolt_rounded),
                 ]),
+                g: P.hero,
               )
-            else
-              card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('TODAY · ${dn[DateTime.now().weekday - 1].toUpperCase()}', style: const TextStyle(color: kG1, fontWeight: FontWeight.w800, letterSpacing: 1.5, fontSize: 12)),
-                const SizedBox(height: 4),
-                const Text('Rest day', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
-                const Text('Recovery is part of the plan. Sleep, eat, stretch.', style: TextStyle(color: kMu)),
-                const SizedBox(height: 14),
-                gbtn('Train anyway', () => pickRoutine(c), i: Icons.bolt_rounded),
+            else ...[
+              for (var s = 0; s < 2; s++)
+                if (plans[s] != null) sessionCard(c, s, plans[s]!, doneToday),
+              Center(child: TextButton(onPressed: () => pickRoutine(c), child: Text('Pick a different routine', style: ts(14, c: P.mu)))),
+            ],
+            if (needBackup)
+              card(Row(children: [
+                gicon(Icons.cloud_upload_rounded, size: 30),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Save a backup', style: ts(15, w: FontWeight.w800)),
+                  Text(last == null ? 'You have not backed up yet.' : 'Last backup was ${now.difference(last).inDays} days ago.', style: ts(12, c: P.mu)),
+                ])),
+                TextButton(onPressed: onBackup, child: Text('Open', style: ts(14, w: FontWeight.w800, c: P.ac))),
               ])),
             card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                const Text('This week', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-                Text('$week / $goal workouts', style: const TextStyle(color: kMu)),
+                Text('This week', style: ts(16, w: FontWeight.w800)),
+                Text('$week / $goal workouts', style: ts(14, c: P.mu)),
               ]),
               const SizedBox(height: 10),
-              ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(value: (week / goal).clamp(0.0, 1.0).toDouble(), minHeight: 8, backgroundColor: kLine, color: kG1)),
+              gbar(week / goal, h: 10),
               const SizedBox(height: 18),
-              const Text('Minutes per day', style: TextStyle(color: kMu, fontSize: 12)),
+              Text('Minutes per day', style: ts(12, c: P.mu)),
               const SizedBox(height: 8),
               SizedBox(height: 130, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final x in ds) st.mins(dk(x))], [for (final x in ds) wd[x.weekday - 1]]))),
             ])),
@@ -689,39 +932,39 @@ class HomePage extends StatelessWidget {
       );
 }
 
-// ---------- weekly plan ----------
-Future<void> setDay(int d, int rid) async {
-  await DB.d.insert('schedule', {'day': d, 'rid': rid}, conflictAlgorithm: ConflictAlgorithm.replace);
+// ---------- weekly plan (2 sessions a day) ----------
+Future<void> setSlot(int d, int slot, int rid) async {
+  await DB.d.insert('schedule', {'day': d, 'slot': slot, 'rid': rid}, conflictAlgorithm: ConflictAlgorithm.replace);
   tick.value++;
 }
 
-Future<void> pickDay(BuildContext c, int d) async {
+Future<void> pickSlot(BuildContext c, int d, int slot) async {
   final rs = await DB.d.query('routines');
   if (!c.mounted) return;
   showModalBottomSheet(
     context: c,
     isScrollControlled: true,
-    backgroundColor: kCard,
+    backgroundColor: P.card,
     shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
     builder: (b) => SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('${dn[d - 1]} workout', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+        Text('${dn[d - 1]} · ${slot == 0 ? 'Morning' : 'Evening'}', style: ts(20, w: FontWeight.w800)),
         const SizedBox(height: 8),
         ListTile(
-          leading: const Icon(Icons.bedtime_rounded, color: kMu),
-          title: const Text('Rest day'),
+          leading: Icon(Icons.bedtime_rounded, color: P.mu),
+          title: const Text('Rest / nothing'),
           onTap: () {
-            setDay(d, 0);
+            setSlot(d, slot, 0);
             Navigator.pop(b);
           },
         ),
         for (final r in rs)
           ListTile(
-            leading: const Icon(Icons.fitness_center, color: kG1),
+            leading: gicon(Icons.fitness_center),
             title: Text(r['name'] as String),
             onTap: () {
-              setDay(d, r['id'] as int);
+              setSlot(d, slot, r['id'] as int);
               Navigator.pop(b);
             },
           ),
@@ -730,42 +973,59 @@ Future<void> pickDay(BuildContext c, int d) async {
   );
 }
 
+Widget slotRow(BuildContext c, int d, int k, Map<String, Object?>? pl) => GestureDetector(
+      onTap: () => pickSlot(c, d, k),
+      child: Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(color: P.soft, borderRadius: BorderRadius.circular(14)),
+        child: Row(children: [
+          gicon(k == 0 ? Icons.wb_sunny_rounded : Icons.nights_stay_rounded, size: 20),
+          const SizedBox(width: 8),
+          SizedBox(width: 56, child: Text(k == 0 ? 'Morning' : 'Evening', style: ts(12, c: P.mu))),
+          Expanded(
+            child: pl == null
+                ? Text('Rest / none', style: ts(14, c: P.mu))
+                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('${pl['name']}', style: ts(15, w: FontWeight.w700)),
+                    const SizedBox(height: 4),
+                    chips(mlist(pl['items'] as Rows).toSet()),
+                  ]),
+          ),
+          Icon(Icons.edit_outlined, size: 16, color: P.mu),
+        ]),
+      ),
+    );
+
 class WeekPage extends StatelessWidget {
   const WeekPage({super.key});
   @override
-  Widget build(BuildContext context) => Async<List<Map<String, Object?>?>>(
-        () async => [for (var d = 1; d <= 7; d++) await planFor(d)],
+  Widget build(BuildContext context) => Async<List<List<Map<String, Object?>?>>>(
+        () async => [for (var d = 1; d <= 7; d++) [await planFor(d, 0), await planFor(d, 1)]],
         (c, pl) => ListView(padding: const EdgeInsets.fromLTRB(20, 4, 20, 120), children: [
-          const Padding(padding: EdgeInsets.only(bottom: 12), child: Text('Tap a day to choose what you train. Rest days are part of it.', style: TextStyle(color: kMu))),
+          Padding(padding: const EdgeInsets.only(bottom: 12), child: Text('Train up to twice a day. Tap a slot to choose its routine.', style: ts(14, c: P.mu))),
           for (var d = 1; d <= 7; d++)
-            GestureDetector(
-              onTap: () => pickDay(c, d),
-              child: Container(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(20), border: Border.all(color: d == DateTime.now().weekday ? kG1 : kLine, width: d == DateTime.now().weekday ? 1.6 : 1)),
-                child: Row(children: [
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(22), border: Border.all(color: d == DateTime.now().weekday ? kG1 : P.line, width: d == DateTime.now().weekday ? 1.6 : 1)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
                   Container(
-                    width: 50,
-                    height: 50,
+                    width: 44,
+                    height: 44,
                     alignment: Alignment.center,
-                    decoration: BoxDecoration(gradient: pl[d - 1] != null ? kGrad : null, color: pl[d - 1] == null ? const Color(0xFF16201B) : null, borderRadius: BorderRadius.circular(14)),
-                    child: Text(dn[d - 1].substring(0, 3).toUpperCase(), style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: pl[d - 1] != null ? Colors.black : kMu)),
+                    decoration: BoxDecoration(gradient: (pl[d - 1][0] != null || pl[d - 1][1] != null) ? kGrad : null, color: (pl[d - 1][0] != null || pl[d - 1][1] != null) ? null : P.soft, borderRadius: BorderRadius.circular(14)),
+                    child: Text(dn[d - 1].substring(0, 3).toUpperCase(), style: ts(13, w: FontWeight.w900, c: (pl[d - 1][0] != null || pl[d - 1][1] != null) ? Colors.black : P.mu)),
                   ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: pl[d - 1] == null
-                        ? const Text('Rest day', style: TextStyle(color: kMu, fontSize: 17, fontWeight: FontWeight.w700))
-                        : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text('${pl[d - 1]!['name']}', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-                            const SizedBox(height: 6),
-                            chips(mlist(pl[d - 1]!['items'] as Rows).toSet()),
-                          ]),
-                  ),
-                  if (d == DateTime.now().weekday) const Text('TODAY ', style: TextStyle(color: kG1, fontSize: 11, fontWeight: FontWeight.w900)),
-                  const Icon(Icons.edit_outlined, color: kMu, size: 18),
+                  const SizedBox(width: 12),
+                  Text(dn[d - 1], style: ts(17, w: FontWeight.w800)),
+                  const Spacer(),
+                  if (d == DateTime.now().weekday) Text('TODAY', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
                 ]),
-              ),
+                slotRow(c, d, 0, pl[d - 1][0]),
+                slotRow(c, d, 1, pl[d - 1][1]),
+              ]),
             ),
           const SizedBox(height: 6),
           gbtn('Manage routines', () => Navigator.push(c, MaterialPageRoute(builder: (_) => sub('My routines', const RoutinesPage()))), i: Icons.list_alt_rounded),
@@ -784,10 +1044,10 @@ class WorkoutPage extends StatefulWidget {
 
 class _WS extends State<WorkoutPage> {
   late List<String> exs;
-  final Map<String, int> target = {};
-  final Map<String, String> mus = {};
-  int ei = 0, reps = 0, restLeft = 0, rest = 60;
-  bool paused = false;
+  final Map<String, int> tSets = {}, tReps = {};
+  final Map<String, String> mus = {}, kinds = {};
+  int ei = 0, reps = 0, hold = 0, restLeft = 0, restTot = 60, rest = 60;
+  bool paused = false, holding = false;
   final sw = Stopwatch()..start();
   Timer? t;
   final logged = <Map<String, Object?>>[];
@@ -798,8 +1058,11 @@ class _WS extends State<WorkoutPage> {
     super.initState();
     exs = [for (final i in widget.items) i['name'] as String];
     for (final i in widget.items) {
-      target[i['name'] as String] = i['sets'] as int;
-      mus[i['name'] as String] = (i['muscle'] as String?) ?? guess(i['name'] as String);
+      final n = i['name'] as String;
+      tSets[n] = i['sets'] as int;
+      tReps[n] = i['reps'] as int;
+      mus[n] = (i['muscle'] as String?) ?? guess(n);
+      kinds[n] = (i['kind'] as String?) ?? (timedName(n) ? 'time' : 'reps');
     }
     DB.kv('rest').then((v) {
       if (v != null) rest = int.tryParse(v) ?? 60;
@@ -810,6 +1073,10 @@ class _WS extends State<WorkoutPage> {
         if (restLeft > 0) {
           restLeft--;
           if (restLeft == 0) HapticFeedback.heavyImpact();
+        }
+        if (holding && exs.isNotEmpty) {
+          hold++;
+          if (hold == tReps[exs[ei]]) HapticFeedback.heavyImpact();
         }
       });
     });
@@ -822,33 +1089,72 @@ class _WS extends State<WorkoutPage> {
     super.dispose();
   }
 
+  bool isT(String ex) => kinds[ex] == 'time';
+  Rows setsOf(String ex) => logged.where((s) => s['ex'] == ex).toList();
+  bool doneEx(String ex) => tSets[ex] != null && setsOf(ex).length >= tSets[ex]!;
+  String amt(String ex, int v) => isT(ex) ? tf(v) : '$v';
+
+  void pick(int i) => setState(() {
+        ei = i;
+        reps = 0;
+        hold = 0;
+        holding = false;
+      });
+
   Future<void> addEx() async {
     final v = await askItem(context);
     if (v != null && v[0].isNotEmpty) {
       setState(() {
         exs.add(v[0]);
-        target[v[0]] = int.tryParse(v[1]) ?? 3;
+        tSets[v[0]] = int.tryParse(v[1]) ?? 3;
+        tReps[v[0]] = int.tryParse(v[2]) ?? (v[4] == 'time' ? 45 : 10);
         mus[v[0]] = v[3];
+        kinds[v[0]] = v[4];
         ei = exs.length - 1;
         reps = 0;
+        hold = 0;
+        holding = false;
       });
     }
   }
 
   Future<void> typeReps() async {
-    final v = await ask(context, 'Total reps done', numeric: true);
+    final timed = exs.isNotEmpty && isT(exs[ei]);
+    final v = await ask(context, timed ? 'Seconds held' : 'Total reps done', numeric: true);
     final n = int.tryParse(v ?? '');
-    if (n != null) setState(() => reps = n);
+    if (n != null) {
+      setState(() {
+        if (timed) {
+          hold = n;
+          holding = false;
+        } else {
+          reps = n;
+        }
+      });
+    }
   }
 
   void logSet() {
-    if (exs.isEmpty || reps <= 0) return;
+    if (exs.isEmpty) return;
+    final ex = exs[ei];
+    final timed = isT(ex);
+    final v = timed ? hold : reps;
+    if (v <= 0) return;
+    var moved = false;
     setState(() {
-      logged.add({'ex': exs[ei], 'reps': reps, 'kg': double.tryParse(kg.text) ?? 0.0, 'muscle': mus[exs[ei]] ?? 'Other'});
+      logged.add({'ex': ex, 'reps': v, 'kg': timed ? 0.0 : (double.tryParse(kg.text) ?? 0.0), 'muscle': mus[ex] ?? 'Other', 'kind': timed ? 'time' : 'reps'});
       reps = 0;
+      hold = 0;
+      holding = false;
       restLeft = rest;
+      restTot = rest;
+      if (doneEx(ex) && ei < exs.length - 1) {
+        ei++;
+        moved = true;
+      }
     });
     HapticFeedback.mediumImpact();
+    if (moved) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ex done · next: ${exs[ei]}')));
   }
 
   Future<void> finish() async {
@@ -863,13 +1169,14 @@ class _WS extends State<WorkoutPage> {
       await b.commit(noResult: true);
       tick.value++;
       if (!mounted) return;
-      final tot = logged.fold<int>(0, (a, s) => a + (s['reps'] as int));
+      final tot = logged.where((s) => s['kind'] != 'time').fold<int>(0, (a, s) => a + (s['reps'] as int));
+      final held = logged.where((s) => s['kind'] == 'time').fold<int>(0, (a, s) => a + (s['reps'] as int));
       await showDialog<void>(
         context: context,
         builder: (d) => AlertDialog(
-          backgroundColor: kCard,
+          backgroundColor: P.card,
           title: const Text('Workout complete 💪'),
-          content: Text('${fmt(secs)}  ·  ${logged.length} sets  ·  $tot reps', style: const TextStyle(fontSize: 18)),
+          content: Text('${fmt(secs)}  ·  ${logged.length} sets${tot > 0 ? '  ·  $tot reps' : ''}${held > 0 ? '  ·  ${tf(held)} held' : ''}', style: ts(18)),
           actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Nice'))],
         ),
       );
@@ -881,15 +1188,27 @@ class _WS extends State<WorkoutPage> {
   @override
   Widget build(BuildContext context) {
     final ex = exs.isEmpty ? null : exs[ei];
-    final done = ex == null ? 0 : logged.where((s) => s['ex'] == ex).length;
+    final mine = ex == null ? <Map<String, Object?>>[] : setsOf(ex);
+    final tS = ex == null ? null : tSets[ex];
+    final tR = ex == null ? null : tReps[ex];
+    final timed = ex != null && isT(ex);
+    final cur = timed ? hold : reps;
+    final planned = tSets.values.fold<int>(0, (a, b) => a + b);
+    var doneInPlan = 0;
+    for (final e in exs) {
+      doneInPlan += math.min(setsOf(e).length, tSets[e] ?? 0);
+    }
+    final nPills = tS == null ? mine.length + 1 : math.max(tS, mine.length);
+    final left = tR == null ? null : tR - cur;
+    final setsLeft = tS == null ? null : math.max(0, tS - mine.length);
     return bg(Scaffold(
       backgroundColor: Colors.transparent,
       body: SafeArea(
         child: ListView(padding: const EdgeInsets.all(20), children: [
           Row(children: [
             IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
-            Expanded(child: Text(widget.name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800))),
-            TextButton(onPressed: finish, child: const Text('FINISH', style: TextStyle(color: kG1, fontWeight: FontWeight.w900))),
+            Expanded(child: Text(widget.name, style: ts(20, w: FontWeight.w800))),
+            TextButton(onPressed: finish, child: Text('FINISH', style: ts(14, w: FontWeight.w900, c: P.ac))),
           ]),
           const SizedBox(height: 8),
           Center(
@@ -901,10 +1220,10 @@ class _WS extends State<WorkoutPage> {
                 child: Container(
                   width: 196,
                   height: 196,
-                  decoration: const BoxDecoration(shape: BoxShape.circle, color: kBg),
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: P.bg),
                   child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Text(fmt(sw.elapsed.inSeconds), style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w900)),
-                    Text(paused ? 'PAUSED' : 'WORKOUT TIME', style: const TextStyle(color: kG1, fontSize: 12, letterSpacing: 2)),
+                    Text(fmt(sw.elapsed.inSeconds), style: ts(48, w: FontWeight.w900)),
+                    Text(paused ? 'PAUSED' : 'WORKOUT TIME', style: ts(12, c: P.ac, ls: 2)),
                   ]),
                 ),
               ),
@@ -916,11 +1235,25 @@ class _WS extends State<WorkoutPage> {
               style: IconButton.styleFrom(backgroundColor: kG1, foregroundColor: Colors.black),
               onPressed: () => setState(() {
                 paused = !paused;
-                paused ? sw.stop() : sw.start();
+                if (paused) {
+                  sw.stop();
+                  holding = false;
+                } else {
+                  sw.start();
+                }
               }),
               icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 30),
             ),
           ),
+          if (planned > 0) ...[
+            const SizedBox(height: 12),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text('Workout progress', style: ts(13, c: P.mu)),
+              Text('$doneInPlan / $planned sets', style: ts(13, w: FontWeight.w800, c: P.ac)),
+            ]),
+            const SizedBox(height: 6),
+            gbar(doneInPlan / planned, h: 10),
+          ],
           const SizedBox(height: 14),
           SizedBox(
             height: 46,
@@ -929,70 +1262,120 @@ class _WS extends State<WorkoutPage> {
                 Padding(
                   padding: const EdgeInsets.only(right: 8),
                   child: ChoiceChip(
+                    avatar: doneEx(exs[i]) ? Icon(Icons.check_circle, size: 18, color: i == ei ? Colors.black : P.ac) : (isT(exs[i]) ? Icon(Icons.timer_rounded, size: 16, color: i == ei ? Colors.black : P.mu) : null),
                     label: Text(exs[i]),
                     selected: i == ei,
                     showCheckmark: false,
                     selectedColor: kG1,
-                    backgroundColor: kCard,
-                    labelStyle: TextStyle(color: i == ei ? Colors.black : Colors.white, fontWeight: FontWeight.w700),
-                    onSelected: (_) => setState(() {
-                      ei = i;
-                      reps = 0;
-                    }),
+                    backgroundColor: P.card,
+                    labelStyle: ts(14, w: FontWeight.w700, c: i == ei ? Colors.black : null),
+                    onSelected: (_) => pick(i),
                   ),
                 ),
-              ActionChip(avatar: const Icon(Icons.add, size: 18), label: const Text('Add'), backgroundColor: kCard, onPressed: addEx),
+              ActionChip(avatar: const Icon(Icons.add, size: 18), label: const Text('Add'), backgroundColor: P.card, onPressed: addEx),
             ]),
           ),
           const SizedBox(height: 14),
           if (ex == null)
-            card(const Text('Tap Add to choose your first exercise.', style: TextStyle(color: kMu)))
+            card(Text('Tap Add to choose your first exercise.', style: ts(14, c: P.mu)))
           else
             card(Column(children: [
-              Text(ex, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-              const SizedBox(height: 4),
+              Text(ex, style: ts(22, w: FontWeight.w800)),
+              const SizedBox(height: 6),
               chips([mus[ex] ?? 'Other']),
-              const SizedBox(height: 4),
-              Text('Set ${done + 1}${target[ex] != null ? ' of ${target[ex]}' : ''}', style: const TextStyle(color: kMu)),
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                IconButton(iconSize: 38, onPressed: () => setState(() => reps = reps > 0 ? reps - 1 : 0), icon: const Icon(Icons.remove_circle_outline, color: kMu)),
-                GestureDetector(
-                  onTap: typeReps,
-                  child: ShaderMask(
-                    shaderCallback: (r) => kGrad.createShader(r),
-                    child: SizedBox(width: 120, child: Text('$reps', textAlign: TextAlign.center, style: const TextStyle(fontSize: 76, fontWeight: FontWeight.w900, color: Colors.white))),
-                  ),
-                ),
-                IconButton(iconSize: 38, onPressed: () => setState(() => reps++), icon: const Icon(Icons.add_circle, color: kG1)),
-              ]),
-              const Text('tap the number to type your total reps', style: TextStyle(color: kMu, fontSize: 11)),
-              const SizedBox(height: 10),
-              TextField(
-                controller: kg,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: InputDecoration(labelText: 'Weight kg (optional)', filled: true, fillColor: kBg, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none)),
-              ),
+              if (tS != null) ...[
+                const SizedBox(height: 4),
+                Text('Target: $tS sets × ${amt(ex, tR ?? 0)}${timed ? '' : ' reps'}', style: ts(13, c: P.mu)),
+              ],
               const SizedBox(height: 12),
+              Wrap(alignment: WrapAlignment.center, spacing: 8, runSpacing: 8, children: [
+                for (var i = 0; i < nPills; i++)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      gradient: i < mine.length ? kGrad : null,
+                      color: i < mine.length ? null : P.soft,
+                      borderRadius: BorderRadius.circular(14),
+                      border: i == mine.length ? Border.all(color: kG1, width: 1.8) : null,
+                    ),
+                    child: Column(children: [
+                      Text('SET ${i + 1}', style: ts(10, w: FontWeight.w700, c: i < mine.length ? Colors.black87 : P.mu)),
+                      Text(i < mine.length ? '${amt(ex, mine[i]['reps'] as int)} ✓' : (tR != null ? amt(ex, tR) : '–'), style: ts(17, w: FontWeight.w900, c: i < mine.length ? Colors.black : null)),
+                    ]),
+                  ),
+              ]),
+              const SizedBox(height: 8),
+              if (timed) ...[
+                const SizedBox(height: 6),
+                ShaderMask(shaderCallback: (r) => kGrad.createShader(r), child: Text(fmt(hold), style: ts(64, w: FontWeight.w900, c: Colors.white))),
+                if (tR != null) ...[
+                  gbar(hold / (tR < 1 ? 1 : tR), h: 10),
+                  const SizedBox(height: 6),
+                ],
+              ] else
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  IconButton(iconSize: 40, onPressed: () => setState(() => reps = reps > 0 ? reps - 1 : 0), icon: Icon(Icons.remove_circle_outline, color: P.mu)),
+                  GestureDetector(
+                    onTap: typeReps,
+                    child: ShaderMask(
+                      shaderCallback: (r) => kGrad.createShader(r),
+                      child: SizedBox(width: 120, child: Text('$reps', textAlign: TextAlign.center, style: ts(76, w: FontWeight.w900, c: Colors.white))),
+                    ),
+                  ),
+                  IconButton(iconSize: 40, onPressed: () => setState(() => reps++), icon: Icon(Icons.add_circle, color: P.ac)),
+                ]),
+              if (left != null)
+                Text(
+                  timed ? (left > 0 ? '${left}s left' : left == 0 ? 'Target reached ✓' : '+${-left}s over target') : (left > 0 ? '$left reps left' : left == 0 ? 'Target reached ✓' : '+${-left} over target'),
+                  style: ts(16, w: FontWeight.w800, c: left <= 0 ? P.ac : P.mu),
+                ),
+              if (setsLeft != null) Text(setsLeft > 0 ? '$setsLeft ${setsLeft == 1 ? 'set' : 'sets'} left for this exercise' : 'All sets done for this exercise', style: ts(13, c: P.mu)),
+              const SizedBox(height: 8),
+              if (timed) ...[
+                gbtn(holding ? 'Pause hold' : (hold > 0 ? 'Resume hold' : 'Start hold'), () => setState(() => holding = !holding), i: holding ? Icons.pause_rounded : Icons.timer_rounded),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  TextButton(onPressed: () => setState(() {
+                        hold = 0;
+                        holding = false;
+                      }), child: const Text('Reset')),
+                  TextButton(onPressed: typeReps, child: const Text('Type seconds')),
+                  if (tR != null) TextButton(onPressed: () => setState(() => hold = tR), child: Text('Set to ${tR}s')),
+                ]),
+              ] else ...[
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  TextButton(onPressed: typeReps, child: const Text('Type total')),
+                  if (tR != null) TextButton(onPressed: () => setState(() => reps = tR), child: Text('Set to $tR')),
+                ]),
+                TextField(controller: kg, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: fld('Weight kg (optional)')),
+                const SizedBox(height: 12),
+              ],
               gbtn('Log set', logSet, i: Icons.check_rounded),
             ])),
           if (restLeft > 0)
-            card(Row(children: [
-              const Icon(Icons.hourglass_bottom_rounded, color: kG1),
-              const SizedBox(width: 10),
-              Text('Rest ${fmt(restLeft)}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-              const Spacer(),
-              TextButton(onPressed: () => setState(() => restLeft += 15), child: const Text('+15s')),
-              TextButton(onPressed: () => setState(() => restLeft = 0), child: const Text('Skip')),
+            card(Column(children: [
+              Row(children: [
+                gicon(Icons.hourglass_bottom_rounded),
+                const SizedBox(width: 10),
+                Text('Rest ${fmt(restLeft)}', style: ts(22, w: FontWeight.w800)),
+                const Spacer(),
+                TextButton(onPressed: () => setState(() {
+                      restLeft += 15;
+                      restTot += 15;
+                    }), child: const Text('+15s')),
+                TextButton(onPressed: () => setState(() => restLeft = 0), child: const Text('Skip')),
+              ]),
+              const SizedBox(height: 6),
+              gbar(restLeft / (restTot < 1 ? 1 : restTot)),
             ])),
           if (logged.isNotEmpty)
             card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Logged sets', style: TextStyle(fontWeight: FontWeight.w800)),
+              ttl('Logged sets'),
               for (final s in logged.reversed)
                 ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,
                   title: Text('${s['ex']}'),
-                  trailing: Text('${s['reps']} reps${(s['kg'] as double) > 0 ? ' · ${s['kg']} kg' : ''}', style: const TextStyle(color: kG1)),
+                  trailing: Text('${amtOf(s)}${(s['kg'] as double) > 0 ? ' · ${s['kg']} kg' : ''}', style: ts(14, c: P.ac)),
                 ),
             ])),
         ]),
@@ -1022,7 +1405,7 @@ class RoutinesPage extends StatelessWidget {
               onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => RoutineEditor(r['id'] as int))),
               child: Container(
                 margin: const EdgeInsets.only(bottom: 14),
-                decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(22), border: Border.all(color: kLine)),
+                decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(22), border: Border.all(color: P.line)),
                 child: Row(children: [
                   ClipRRect(
                     borderRadius: const BorderRadius.horizontal(left: Radius.circular(22)),
@@ -1030,12 +1413,12 @@ class RoutinesPage extends StatelessWidget {
                   ),
                   const SizedBox(width: 14),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('${r['name']}', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-                    Text('${r['n']} exercises', style: const TextStyle(color: kMu, fontSize: 13)),
+                    Text('${r['name']}', style: ts(17, w: FontWeight.w800)),
+                    Text('${r['n']} exercises', style: ts(13, c: P.mu)),
                     const SizedBox(height: 6),
                     chips((r['m'] as List<String>).toSet()),
                   ])),
-                  const Padding(padding: EdgeInsets.all(12), child: Icon(Icons.edit_outlined, color: kMu)),
+                  Padding(padding: const EdgeInsets.all(12), child: Icon(Icons.edit_outlined, color: P.mu)),
                 ]),
               ),
             ),
@@ -1072,7 +1455,7 @@ class _RE extends State<RoutineEditor> {
   Future<void> add() async {
     final v = await askItem(context);
     if (v != null && v[0].isNotEmpty) {
-      setState(() => items.add({'name': v[0], 'sets': int.tryParse(v[1]) ?? 3, 'reps': int.tryParse(v[2]) ?? 10, 'muscle': v[3]}));
+      setState(() => items.add({'name': v[0], 'sets': int.tryParse(v[1]) ?? 3, 'reps': int.tryParse(v[2]) ?? 10, 'muscle': v[3], 'kind': v[4]}));
     }
   }
 
@@ -1088,7 +1471,7 @@ class _RE extends State<RoutineEditor> {
       await DB.d.delete('items', where: 'rid=?', whereArgs: [rid]);
     }
     for (final i in items) {
-      await DB.d.insert('items', {'rid': rid, 'name': i['name'], 'sets': i['sets'], 'reps': i['reps'], 'muscle': i['muscle']});
+      await DB.d.insert('items', {'rid': rid, 'name': i['name'], 'sets': i['sets'], 'reps': i['reps'], 'muscle': i['muscle'], 'kind': i['kind']});
     }
     tick.value++;
     if (!mounted) return;
@@ -1107,21 +1490,21 @@ class _RE extends State<RoutineEditor> {
   @override
   Widget build(BuildContext context) => bg(Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('Routine', style: TextStyle(fontWeight: FontWeight.w800)), actions: [
+        appBar: AppBar(backgroundColor: Colors.transparent, title: Text('Routine', style: ts(20, w: FontWeight.w800)), actions: [
           if (widget.id != null) IconButton(onPressed: del, icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
         ]),
         body: ListView(padding: const EdgeInsets.all(20), children: [
-          TextField(controller: name, decoration: InputDecoration(labelText: 'Routine name', filled: true, fillColor: kCard, border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none))),
+          TextField(controller: name, decoration: fld('Routine name')),
           const SizedBox(height: 16),
           for (var i = 0; i < items.length; i++)
             card(Row(children: [
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('${items[i]['name']}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-                Text('${items[i]['sets']} sets × ${items[i]['reps']} reps', style: const TextStyle(color: kMu)),
+                Text('${items[i]['name']}', style: ts(16, w: FontWeight.w800)),
+                Text('${items[i]['sets']} sets × ${perSet(items[i])}', style: ts(14, c: P.mu)),
                 const SizedBox(height: 6),
                 chips([(items[i]['muscle'] as String?) ?? guess(items[i]['name'] as String)]),
               ])),
-              IconButton(onPressed: () => setState(() => items.removeAt(i)), icon: const Icon(Icons.close, color: kMu)),
+              IconButton(onPressed: () => setState(() => items.removeAt(i)), icon: Icon(Icons.close, color: P.mu)),
             ])),
           gbtn('Add exercise', add, i: Icons.add_rounded),
           gbtn('Save routine', save, i: Icons.check_rounded),
@@ -1138,9 +1521,14 @@ class StatsPage extends StatelessWidget {
         const wd = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
         final m = <String, int>{};
         final best = <String, List<num>>{};
+        final bt = <String, int>{};
         for (final s in st.ss) {
           final k = s['ex'] as String;
           final r = s['reps'] as int;
+          if (s['kind'] == 'time') {
+            bt[k] = math.max(bt[k] ?? 0, r);
+            continue;
+          }
           final w = (s['kg'] as num?)?.toDouble() ?? 0.0;
           m[k] = (m[k] ?? 0) + r;
           final b = best.putIfAbsent(k, () => <num>[0, 0]);
@@ -1169,16 +1557,16 @@ class StatsPage extends StatelessWidget {
             SizedBox(height: 130, width: double.infinity, child: CustomPaint(painter: TrendPainter([for (final x in d30) st.reps(dk(x))]))),
           ])),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            ttl('Muscles trained', 'share of total reps'),
+            ttl('Muscles trained', 'share of total sets'),
             if (pv.isEmpty)
-              const Text('Finish a workout to see your muscle split.', style: TextStyle(color: kMu))
+              Text('Finish a workout to see your muscle split.', style: ts(14, c: P.mu))
             else ...[
               SizedBox(
                 height: 200,
                 width: double.infinity,
                 child: Stack(alignment: Alignment.center, children: [
                   CustomPaint(size: const Size(200, 200), painter: PiePainter(pv, [for (final x in pm) mc(x)])),
-                  Column(mainAxisSize: MainAxisSize.min, children: [Text('${ptot.round()}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900)), const Text('reps', style: TextStyle(color: kMu))]),
+                  Column(mainAxisSize: MainAxisSize.min, children: [Text('${ptot.round()}', style: ts(28, w: FontWeight.w900)), Text('sets', style: ts(14, c: P.mu))]),
                 ]),
               ),
               const SizedBox(height: 12),
@@ -1187,34 +1575,42 @@ class StatsPage extends StatelessWidget {
                   Row(mainAxisSize: MainAxisSize.min, children: [
                     Container(width: 12, height: 12, decoration: BoxDecoration(color: mc(pm[i]), shape: BoxShape.circle)),
                     const SizedBox(width: 6),
-                    Text('${pm[i]} ${(pv[i] * 100 / ptot).round()}%', style: const TextStyle(fontSize: 13)),
+                    Text('${pm[i]} ${(pv[i] * 100 / ptot).round()}%', style: ts(13)),
                   ]),
               ]),
             ],
           ])),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             ttl('Top exercises', 'total reps'),
-            if (top.isEmpty) const Text('Nothing logged yet.', style: TextStyle(color: kMu)),
+            if (top.isEmpty) Text('Nothing logged yet.', style: ts(14, c: P.mu)),
             for (final e in top.take(6))
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(e.key), Text('${e.value}', style: const TextStyle(color: kG1, fontWeight: FontWeight.w800))]),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(e.key), Text('${e.value}', style: ts(14, w: FontWeight.w800, c: P.ac))]),
                   const SizedBox(height: 4),
-                  FractionallySizedBox(alignment: Alignment.centerLeft, widthFactor: e.value / mx, child: Container(height: 8, decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(6)))),
+                  gbar(e.value / mx),
                 ]),
               ),
           ])),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            ttl('Personal bests', 'most reps in one set · heaviest weight'),
-            if (top.isEmpty) const Text('Nothing logged yet.', style: TextStyle(color: kMu)),
+            ttl('Personal bests', 'most reps in one set · heaviest weight · longest hold'),
+            if (top.isEmpty && bt.isEmpty) Text('Nothing logged yet.', style: ts(14, c: P.mu)),
+            for (final e in bt.entries)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: gicon(Icons.timer_rounded),
+                title: Text(e.key),
+                trailing: Text('best hold ${tf(e.value)}', style: ts(14, w: FontWeight.w700, c: P.ac)),
+              ),
             for (final e in top.take(6))
               ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.emoji_events_rounded, color: kG1),
+                leading: gicon(Icons.emoji_events_rounded),
                 title: Text(e.key),
-                trailing: Text('${best[e.key]![1]} reps${best[e.key]![0] > 0 ? ' · ${best[e.key]![0].toDouble().toStringAsFixed(1)} kg' : ''}', style: const TextStyle(color: kG1, fontWeight: FontWeight.w700)),
+                trailing: Text('${best[e.key]![1]} reps${best[e.key]![0] > 0 ? ' · ${best[e.key]![0].toDouble().toStringAsFixed(1)} kg' : ''}', style: ts(14, w: FontWeight.w700, c: P.ac)),
               ),
           ])),
           card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1226,11 +1622,11 @@ class StatsPage extends StatelessWidget {
                   height: 34,
                   decoration: BoxDecoration(
                     gradient: st.wdays.contains(dk(x)) ? kGrad : null,
-                    color: st.wdays.contains(dk(x)) ? null : (st.lg.contains(dk(x)) ? const Color(0x3300E676) : const Color(0xFF16201B)),
+                    color: st.wdays.contains(dk(x)) ? null : (st.lg.contains(dk(x)) ? const Color(0x3300E676) : P.soft),
                     borderRadius: BorderRadius.circular(9),
                   ),
                   alignment: Alignment.center,
-                  child: Text('${x.day}', style: TextStyle(fontSize: 11, color: st.wdays.contains(dk(x)) ? Colors.black : kMu)),
+                  child: Text('${x.day}', style: ts(11, c: st.wdays.contains(dk(x)) ? Colors.black : P.mu)),
                 ),
             ]),
           ])),
@@ -1246,10 +1642,10 @@ class HistoryPage extends StatelessWidget {
   Widget build(BuildContext context) => Async<St>(St.load, (c, st) {
         if (st.ws.isEmpty) {
           return ListView(padding: const EdgeInsets.all(30), children: [
-            Image.asset('${img}empty.jpg', height: 280),
-            const SizedBox(height: 10),
-            const Text('No workouts yet', textAlign: TextAlign.center, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-            const Text('Finish your first workout and it will show up here.', textAlign: TextAlign.center, style: TextStyle(color: kMu)),
+            ClipRRect(borderRadius: BorderRadius.circular(24), child: Image.asset('${img}empty.jpg', height: 280, fit: BoxFit.cover)),
+            const SizedBox(height: 14),
+            Text('No workouts yet', textAlign: TextAlign.center, style: ts(22, w: FontWeight.w800)),
+            Text('Finish your first workout and it will show up here.', textAlign: TextAlign.center, style: ts(14, c: P.mu)),
           ]);
         }
         final g = <int, Rows>{};
@@ -1260,18 +1656,18 @@ class HistoryPage extends StatelessWidget {
           for (final w in st.ws)
             Container(
               margin: const EdgeInsets.only(bottom: 12),
-              decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(20), border: Border.all(color: kLine)),
+              decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(20), border: Border.all(color: P.line)),
               child: Theme(
                 data: Theme.of(c).copyWith(dividerColor: Colors.transparent),
                 child: ExpansionTile(
-                  title: Text('${w['routine']}', style: const TextStyle(fontWeight: FontWeight.w800)),
-                  subtitle: Text('${w['day']} · ${fmt(w['secs'] as int)} · ${(g[w['id']] ?? []).length} sets', style: const TextStyle(color: kMu)),
+                  title: Text('${w['routine']}', style: ts(16, w: FontWeight.w800)),
+                  subtitle: Text('${w['day']} · ${fmt(w['secs'] as int)} · ${(g[w['id']] ?? []).length} sets', style: ts(13, c: P.mu)),
                   children: [
                     for (final s in g[w['id']] ?? <Map<String, Object?>>[])
                       ListTile(
                         dense: true,
                         title: Text('${s['ex']}'),
-                        trailing: Text('${s['reps']} reps${((s['kg'] as num?) ?? 0) > 0 ? ' · ${s['kg']} kg' : ''}', style: const TextStyle(color: kG1)),
+                        trailing: Text('${amtOf(s)}${((s['kg'] as num?) ?? 0) > 0 ? ' · ${s['kg']} kg' : ''}', style: ts(14, c: P.ac)),
                       ),
                     TextButton.icon(
                       onPressed: () async {
@@ -1298,21 +1694,21 @@ Widget photo(Map<String, Object?>? ph) => ClipRRect(
           : Image.file(File(ph['path'] as String), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Image.asset('${img}placeholder.jpg', fit: BoxFit.cover)),
     );
 
-double kgOf(Map<String, Object?> p) => (p['kg'] as num?)?.toDouble() ?? 0.0;
+double kgOf(Map<String, Object?> r) => (r['kg'] as num?)?.toDouble() ?? 0.0;
 
 Future<void> addPhoto(BuildContext c) async {
   final src = await showModalBottomSheet<ImageSource>(
     context: c,
-    backgroundColor: kCard,
+    backgroundColor: P.card,
     builder: (b) => SafeArea(
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        ListTile(leading: const Icon(Icons.photo_camera, color: kG1), title: const Text('Take photo'), onTap: () => Navigator.pop(b, ImageSource.camera)),
-        ListTile(leading: const Icon(Icons.photo_library, color: kG1), title: const Text('Choose from gallery'), onTap: () => Navigator.pop(b, ImageSource.gallery)),
+        ListTile(leading: gicon(Icons.photo_camera), title: const Text('Take photo'), onTap: () => Navigator.pop(b, ImageSource.camera)),
+        ListTile(leading: gicon(Icons.photo_library), title: const Text('Choose from gallery'), onTap: () => Navigator.pop(b, ImageSource.gallery)),
       ]),
     ),
   );
   if (src == null) return;
-  final x = await ImagePicker().pickImage(source: src, maxWidth: 1600, imageQuality: 85);
+  final x = await ImagePicker().pickImage(source: src, maxWidth: 1280, imageQuality: 78);
   if (x == null || !c.mounted) return;
   final kgS = await ask(c, 'Body weight in kg (optional)', numeric: true);
   final dir = Directory(p.join(await getDatabasesPath(), 'photos'));
@@ -1328,7 +1724,7 @@ void viewPhoto(BuildContext c, Map<String, Object?> ph) {
   showDialog<void>(
     context: c,
     builder: (d) => Dialog(
-      backgroundColor: kCard,
+      backgroundColor: P.card,
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Flexible(child: InteractiveViewer(child: Image.file(File(ph['path'] as String)))),
         Padding(
@@ -1368,8 +1764,8 @@ class TransformPage extends StatelessWidget {
                 child: Column(children: [
                   AspectRatio(aspectRatio: .75, child: GestureDetector(onTap: ph == null ? null : () => viewPhoto(c, ph), child: photo(ph))),
                   const SizedBox(height: 6),
-                  Text(l, style: const TextStyle(color: kG1, fontWeight: FontWeight.w900, letterSpacing: 1.5, fontSize: 12)),
-                  Text(ph == null ? 'no photo yet' : '${ph['day']}${kgOf(ph) > 0 ? ' · ${kgOf(ph)} kg' : ''}', style: const TextStyle(color: kMu, fontSize: 12)),
+                  Text(l, style: ts(12, w: FontWeight.w900, c: P.ac, ls: 1.5)),
+                  Text(ph == null ? 'no photo yet' : '${ph['day']}${kgOf(ph) > 0 ? ' · ${kgOf(ph)} kg' : ''}', style: ts(12, c: P.mu)),
                 ]),
               ),
             );
@@ -1418,51 +1814,75 @@ class _PP extends State<ProfilePage> {
   final name = TextEditingController(), rest = TextEditingController(), goal = TextEditingController();
   St? st;
   String last = '';
+  bool busy = false;
 
   @override
   void initState() {
     super.initState();
-    () async {
-      last = await DB.kv('lastbackup') ?? '';
-      name.text = await DB.kv('name') ?? '';
-      rest.text = await DB.kv('rest') ?? '60';
-      goal.text = await DB.kv('goal') ?? '4';
-      st = await St.load();
-      if (mounted) setState(() {});
-    }();
+    load();
   }
 
+  Future<void> load() async {
+    last = await DB.kv('lastbackup') ?? '';
+    name.text = await DB.kv('name') ?? '';
+    rest.text = await DB.kv('rest') ?? '60';
+    goal.text = await DB.kv('goal') ?? '4';
+    st = await St.load();
+    if (mounted) setState(() {});
+  }
+
+  void msg(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+
   Future<void> backup() async {
-    final s = await exportBackup();
-    await Clipboard.setData(ClipboardData(text: s));
-    last = dk(DateTime.now());
-    await DB.setKv('lastbackup', last);
-    if (!mounted) return;
-    setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Backup copied. Paste it into Notes or WhatsApp to keep it safe.')));
+    setState(() => busy = true);
+    try {
+      final s = await buildBackup();
+      final f = File(p.join(Directory.systemTemp.path, 'fittrack_backup_${dk(DateTime.now())}.json'));
+      await f.writeAsString(s);
+      last = dk(DateTime.now());
+      await DB.setKv('lastbackup', last);
+      await Share.shareXFiles([XFile(f.path)], text: 'FitTrack backup');
+      tick.value++;
+    } catch (e) {
+      if (mounted) msg('Backup failed. Try again.');
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  Future<bool> sure() async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (d) => AlertDialog(
+          backgroundColor: P.card,
+          title: const Text('Restore backup?'),
+          content: const Text('This replaces your routines, weekly plan, history and photos with the backup.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Restore')),
+          ],
+        ),
+      ) ??
+      false;
+
+  Future<void> after(String? err) async {
+    await load();
+    if (mounted) msg(err ?? 'Backup restored ✔');
   }
 
   Future<void> restore() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.any);
+    final path = r?.files.single.path;
+    if (path == null || !mounted || !await sure()) return;
+    setState(() => busy = true);
+    final err = await importBackup(await File(path).readAsString());
+    if (mounted) setState(() => busy = false);
+    await after(err);
+  }
+
+  Future<void> restoreText() async {
     final clip = (await Clipboard.getData('text/plain'))?.text ?? '';
-    if (!mounted) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        backgroundColor: kCard,
-        title: const Text('Restore backup?'),
-        content: const Text('This replaces your routines, weekly plan and workout history with the backup text you copied. Photos are not affected.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Restore')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    final err = await importBackup(clip);
-    final x = await St.load();
-    if (!mounted) return;
-    setState(() => st = x);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err ?? 'Backup restored ✔')));
+    if (!mounted || !await sure()) return;
+    await after(await importBackup(clip));
   }
 
   Widget field(String l, TextEditingController c, String k, {bool n = false}) => Padding(
@@ -1474,9 +1894,31 @@ class _PP extends State<ProfilePage> {
             DB.setKv(k, v);
             tick.value++;
           },
-          decoration: InputDecoration(labelText: l, filled: true, fillColor: kBg, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none)),
+          decoration: fld(l),
         ),
       );
+
+  Widget themeChip(String l, IconData ic, ThemeMode m) {
+    final on = themeMode.value == m;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () async {
+          await setTheme(m);
+          if (mounted) setState(() {});
+        },
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(gradient: on ? kGrad : null, color: on ? null : P.soft, borderRadius: BorderRadius.circular(16)),
+          child: Column(children: [
+            Icon(ic, color: on ? Colors.black : P.mu),
+            const SizedBox(height: 4),
+            Text(l, style: ts(12, w: FontWeight.w800, c: on ? Colors.black : P.mu)),
+          ]),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1487,6 +1929,14 @@ class _PP extends State<ProfilePage> {
         field('Rest between sets (seconds)', rest, 'rest', n: true),
         field('Weekly workout goal', goal, 'goal', n: true),
       ])),
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ttl('Appearance'),
+        Row(children: [
+          themeChip('Dark', Icons.dark_mode_rounded, ThemeMode.dark),
+          themeChip('Light', Icons.light_mode_rounded, ThemeMode.light),
+          themeChip('System', Icons.phone_android_rounded, ThemeMode.system),
+        ]),
+      ])),
       if (s != null)
         Row(children: [
           tile(Icons.local_fire_department_rounded, '${s.streak(s.wdays)}', 'Workout streak'),
@@ -1496,15 +1946,16 @@ class _PP extends State<ProfilePage> {
       const SizedBox(height: 14),
       card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ttl('Backup & restore', last.isEmpty ? 'No backup yet' : 'Last backup: $last'),
-        const Text('Copies your routines, weekly plan and full history as text. Paste it somewhere safe (Notes, WhatsApp). To restore, copy that text and tap Restore. Photos stay on this phone and are not in the backup.', style: TextStyle(color: kMu, fontSize: 12)),
+        Text('Saves everything (routines, weekly plan, history and your photos) into one file. Share it to Google Drive, WhatsApp or Files. To restore, tap Restore and pick that file.', style: ts(12, c: P.mu)),
         const SizedBox(height: 12),
         Row(children: [
-          Expanded(child: gbtn('Copy backup', backup, i: Icons.copy_rounded)),
+          Expanded(child: gbtn(busy ? 'Working…' : 'Save backup', busy ? () {} : backup, i: Icons.cloud_upload_rounded)),
           const SizedBox(width: 10),
-          Expanded(child: gbtn('Restore', restore, i: Icons.restore_rounded)),
+          Expanded(child: sbtn('Restore', busy ? () {} : restore, i: Icons.restore_rounded)),
         ]),
+        Center(child: TextButton(onPressed: restoreText, child: Text('Restore from copied text (v1.2 backup)', style: ts(12, c: P.mu)))),
       ])),
-      const Text('FitTrack v1.2 · all data is stored on this phone in a local SQLite database.', style: TextStyle(color: kMu, fontSize: 12), textAlign: TextAlign.center),
+      Text('FitTrack v1.3.1 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
