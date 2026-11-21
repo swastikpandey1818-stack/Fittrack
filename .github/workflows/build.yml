@@ -16,26 +16,25 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Force compileSdk 36 on every module (plugins included)
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/compile-sdk.gradle" <<'GRADLE'
+          allprojects { p ->
+            p.afterEvaluate {
+              def ext = p.extensions.findByName('android')
+              if (ext != null) {
+                try { ext.compileSdk = 36 } catch (Throwable t) { ext.compileSdkVersion(36) }
+              }
+            }
+          }
+          GRADLE
       - name: Build
         run: |
           [ -d android ] || flutter create --platforms=android --project-name fittrack --org com.fittrack .
-          if [ -f android/app/build.gradle.kts ]; then
-            sed -i -E "s/compileSdk[[:space:]]*=.*/compileSdk = 36/" android/app/build.gradle.kts
-          elif [ -f android/app/build.gradle ]; then
-            sed -i -E "s/compileSdkVersion[[:space:]]+.*/compileSdkVersion 36/" android/app/build.gradle
-          else
-            echo "Android Gradle file missing"; exit 1
-          fi
-          grep -nE "compileSdk|compileSdkVersion" android/app/build.gradle*
           rm -rf test
           sed -i 's/android:label="[^"]*"/android:label="FitTrack"/' android/app/src/main/AndroidManifest.xml
           flutter pub get
-          # PATCH FILE_PICKER SDK
-          FP_GRADLE=$(find "$HOME/.pub-cache" -type f ( -path "*/file_picker-*/android/build.gradle" -o -path "*/file_picker-*/android/build.gradle.kts" ) -print -quit)
-          if [ -z "$FP_GRADLE" ]; then echo "file_picker Gradle file not found"; exit 1; fi
-          echo "Patching: $FP_GRADLE"
-          sed -i -E "/compileSdk/ { s/compileSdkVersion.*/compileSdkVersion 36/; s/compileSdk[[:space:]]*=.*/compileSdk = 36/; s/compileSdk[[:space:]]+.*/compileSdk 36/; }" "$FP_GRADLE"
-          grep -n "compileSdk" "$FP_GRADLE"
           dart run flutter_launcher_icons
           flutter build apk --release
       - uses: actions/upload-artifact@v4
