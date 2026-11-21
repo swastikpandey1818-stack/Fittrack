@@ -19,6 +19,7 @@ jobs:
       - name: Build
         run: |
           [ -d android ] || flutter create --platforms=android --project-name fittrack --org com.fittrack .
+          sed -i "s/compileSdkVersion 34/compileSdkVersion 36/g; s/compileSdk = 34/compileSdk = 36/g" android/app/build.gradle*
           sed -i "s/compileSdk = 34/compileSdk = 36/g" android/app/build.gradle.kts
           rm -rf test
           sed -i 's/android:label="[^"]*"/android:label="FitTrack"/' android/app/src/main/AndroidManifest.xml
