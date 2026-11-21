@@ -346,14 +346,41 @@ Future<String?> importBackup(String s) async {
 }
 
 // ---------- app ----------
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await DB.init();
-  await DB.d.insert('logins', {'day': dk(DateTime.now())}, conflictAlgorithm: ConflictAlgorithm.ignore);
-  await loadTheme();
-  unawaited(Remind.init());
-  unawaited(Ads.init());
-  runApp(const App());
+class ErrorApp extends StatelessWidget {
+  final String msg;
+  const ErrorApp(this.msg, {super.key});
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: const Color(0xFF040706),
+          body: SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: SelectableText('FitTrack could not start. Please send this text to Claude:\n\n$msg', style: const TextStyle(color: Colors.white, fontSize: 13)),
+            ),
+          ),
+        ),
+      );
+}
+
+void main() {
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    try {
+      await DB.init();
+      await DB.d.insert('logins', {'day': dk(DateTime.now())}, conflictAlgorithm: ConflictAlgorithm.ignore);
+      await loadTheme();
+    } catch (e, st) {
+      runApp(ErrorApp('$e\n\n$st'));
+      return;
+    }
+    runApp(const App());
+    Future.delayed(const Duration(seconds: 4), () {
+      Remind.init();
+      Ads.init();
+    });
+  }, (e, st) {});
 }
 
 ThemeData mkTheme(bool d) => ThemeData(
