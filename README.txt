@@ -1,3 +1,5 @@
+Vytron Fit v1.5.1: app renamed from FitTrack (display name only; package id and data unchanged).
+
 FitTrack v1.5
 - Workout sections: group exercises in a routine (e.g. Strength, Defence). The workout switches section automatically with a banner.
 - Flexibility: stretch library with YouTube links; attach stretches to each routine, before or after the workout.

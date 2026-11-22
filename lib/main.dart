@@ -429,7 +429,7 @@ Future<String> buildBackup() async {
 Future<String?> importBackup(String s) async {
   try {
     final o = jsonDecode(s) as Map<String, dynamic>;
-    if (o['app'] != 'fittrack') return 'That is not a FitTrack backup.';
+    if (o['app'] != 'fittrack') return 'That is not a Vytron Fit backup.';
     final dir = Directory(p.join(await getDatabasesPath(), 'photos'));
     await dir.create(recursive: true);
     final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -484,7 +484,7 @@ class ErrorApp extends StatelessWidget {
           body: SafeArea(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
-              child: SelectableText('FitTrack could not start. Please send this text to Claude:\n\n$msg', style: const TextStyle(color: Colors.white, fontSize: 13)),
+              child: SelectableText('Vytron Fit could not start. Please send this text to Claude:\n\n$msg', style: const TextStyle(color: Colors.white, fontSize: 13)),
             ),
           ),
         ),
@@ -522,7 +522,7 @@ class App extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
         valueListenable: themeMode,
-        builder: (_, m, __) => MaterialApp(title: 'FitTrack', debugShowCheckedModeBanner: false, themeMode: m, theme: mkTheme(false), darkTheme: mkTheme(true), home: const Splash()),
+        builder: (_, m, __) => MaterialApp(title: 'Vytron Fit', debugShowCheckedModeBanner: false, themeMode: m, theme: mkTheme(false), darkTheme: mkTheme(true), home: const Splash()),
       );
 }
 
@@ -1391,7 +1391,7 @@ Future<void> exportCsv(BuildContext c) async {
     }
     final f = File(p.join(Directory.systemTemp.path, 'fittrack_export_${dk(DateTime.now())}.csv'));
     await f.writeAsString(b.toString());
-    await Share.shareXFiles([XFile(f.path)], text: 'FitTrack export');
+    await Share.shareXFiles([XFile(f.path)], text: 'Vytron Fit export');
   } catch (_) {
     if (c.mounted) ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('Export failed. Try again.')));
   }
@@ -1824,7 +1824,7 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int i = 0;
-  static const titles = ['FitTrack', 'Weekly plan', 'Progress', 'Transformation', 'Profile'];
+  static const titles = ['Vytron Fit', 'Weekly plan', 'Progress', 'Transformation', 'Profile'];
   void go(int k) => setState(() => i = k);
 
   Widget nav(int k) {
@@ -1867,7 +1867,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.5', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.5', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -3377,7 +3377,7 @@ class _PP extends State<ProfilePage> {
       await f.writeAsString(s);
       last = dk(DateTime.now());
       await DB.setKv('lastbackup', last);
-      await Share.shareXFiles([XFile(f.path)], text: 'FitTrack backup');
+      await Share.shareXFiles([XFile(f.path)], text: 'Vytron Fit backup');
       tick.value++;
     } catch (e) {
       if (mounted) msg('Backup failed. Try again.');
@@ -3493,7 +3493,7 @@ class _PP extends State<ProfilePage> {
       ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('FitTrack v1.5 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('Vytron Fit v1.5 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
