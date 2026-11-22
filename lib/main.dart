@@ -14,6 +14,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
 import 'package:google_mobile_ads/google_mobile_ads.dart' show MobileAds, InterstitialAd, InterstitialAdLoadCallback, AdRequest, FullScreenContentCallback;
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:url_launcher/url_launcher.dart' show launchUrl, LaunchMode;
+import 'exercise_data.dart';
 
 // ---------- theme / palette ----------
 class P {
@@ -36,8 +38,8 @@ const kG2 = Color(0xFF00A152);
 const kGrad = LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [kG1, kG2]);
 const img = 'assets/images/';
 const dn = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-const muscles = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Cardio', 'Other'];
-const mColors = [Color(0xFF00E676), Color(0xFF00BFA5), Color(0xFFB2FF59), Color(0xFF64FFDA), Color(0xFF69F0AE), Color(0xFF76FF03), Color(0xFF1DE9B6), Color(0xFF86A194)];
+const muscles = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Cardio', 'Combat', 'Mobility', 'Other'];
+const mColors = [Color(0xFF00E676), Color(0xFF00BFA5), Color(0xFFB2FF59), Color(0xFF64FFDA), Color(0xFF69F0AE), Color(0xFF76FF03), Color(0xFF1DE9B6), Color(0xFFFFB300), Color(0xFF40C4FF), Color(0xFF86A194)];
 final tick = ValueNotifier<int>(0);
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.dark);
 
@@ -75,7 +77,8 @@ String fmt(int s) {
 
 bool timedName(String n) {
   final s = n.toLowerCase();
-  return ['plank', 'wall sit', 'dead hang', 'l-sit', 'hold', 'stretch', 'isometric'].any((x) => s.contains(x));
+  if (s.endsWith(' round')) return true;
+  return ['plank', 'wall sit', 'dead hang', 'l-sit', 'hold', 'stretch', 'isometric', 'pose', 'rounds', 'shadow', 'heavy bag', 'sparring', 'splits', 'foam roll'].any((x) => s.contains(x));
 }
 
 String tf(int s) => s >= 60 ? '${s ~/ 60}m ${s % 60}s' : '${s}s';
@@ -84,13 +87,15 @@ String perSet(Map<String, Object?> m) => m['kind'] == 'time' ? tf(m['reps'] as i
 
 Color mc(String m) {
   final i = muscles.indexOf(m);
-  final c = mColors[i < 0 ? 7 : i];
+  final c = mColors[i < 0 ? mColors.length - 1 : i];
   return P.dark ? c : HSLColor.fromColor(c).withLightness(.3).toColor();
 }
 
 String guess(String n) {
   final s = n.toLowerCase();
   bool h(List<String> k) => k.any((x) => s.contains(x));
+  if (h(['stretch', 'mobility', 'yoga', 'flexib', 'pigeon', 'foam roll', 'splits', ' pose', 'cat-cow', 'cat cow', 'child pose', 'hip circles', 'leg swing'])) return 'Mobility';
+  if (!s.contains('kickback') && (h(['punch', 'jab', 'hook', 'uppercut', 'kick', 'shadow', 'boxing', 'sparring', 'guard', 'defen', 'parry', 'slip', 'bob &', 'bob and', 'weave', 'sprawl', 'elbow strike', 'knee strike', 'teep', 'heavy bag', 'pad work', 'mitt', 'muay', 'clinch']) || s == 'cross' || s.startsWith('cross '))) return 'Combat';
   if (h(['squat', 'lunge', 'leg press', 'calf', 'leg curl', 'leg ext', 'glute', 'hamstring', 'quad'])) return 'Legs';
   if (h(['plank', 'crunch', 'sit-up', 'situp', 'abs', 'leg raise', 'twist'])) return 'Core';
   if (h(['run', 'burpee', 'jump', 'climber', 'skip', 'cycl', 'rope', 'jog'])) return 'Cardio';
@@ -115,7 +120,7 @@ String cover(List<String> ms) {
       top = k;
     }
   });
-  return top == 'Legs' ? 'legs' : top == 'Core' ? 'core' : top == 'Cardio' ? 'cardio' : 'upper';
+  return top == 'Legs' ? 'legs' : (top == 'Core' || top == 'Mobility') ? 'core' : (top == 'Cardio' || top == 'Combat') ? 'cardio' : 'upper';
 }
 
 // ---------- database ----------
@@ -123,16 +128,18 @@ class DB {
   static late Database d;
   static const schedSql = 'CREATE TABLE schedule(day INTEGER, slot INTEGER, rid INTEGER, PRIMARY KEY(day, slot))';
   static const warmSql = 'CREATE TABLE warmups(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amt INTEGER, kind TEXT, pos INTEGER)';
+  static const flexSql = 'CREATE TABLE flex(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, url TEXT, amt INTEGER, kind TEXT, note TEXT)';
+  static const linkSql = 'CREATE TABLE exlinks(name TEXT PRIMARY KEY, url TEXT)';
   static const photoSql = 'CREATE TABLE photos(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, day TEXT, path TEXT, kg REAL, note TEXT)';
 
   static Future<void> init() async {
     d = await openDatabase(
       p.join(await getDatabasesPath(), 'fittrack.db'),
-      version: 5,
+      version: 6,
       onCreate: (db, v) async {
         await db.execute('CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT)');
-        await db.execute('CREATE TABLE routines(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
-        await db.execute('CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, name TEXT, sets INTEGER, reps INTEGER, muscle TEXT, kind TEXT)');
+        await db.execute('CREATE TABLE routines(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, flex_when TEXT, flex_ids TEXT)');
+        await db.execute('CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, name TEXT, sets INTEGER, reps INTEGER, muscle TEXT, kind TEXT, sec TEXT)');
         await db.execute('CREATE TABLE workouts(id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT, ts INTEGER, routine TEXT, secs INTEGER)');
         await db.execute('CREATE TABLE sets(id INTEGER PRIMARY KEY AUTOINCREMENT, wid INTEGER, ex TEXT, reps INTEGER, kg REAL, muscle TEXT, kind TEXT)');
         await db.execute('CREATE TABLE logins(day TEXT PRIMARY KEY)');
@@ -140,6 +147,9 @@ class DB {
         await db.execute(photoSql);
         await db.execute(warmSql);
         await seedWarm(db);
+        await db.execute(flexSql);
+        await db.execute(linkSql);
+        await seedFlex(db);
         await seed(db, fresh: true);
       },
       onUpgrade: (db, o, n) async {
@@ -176,6 +186,22 @@ class DB {
           await db.execute(warmSql);
           await seedWarm(db);
         }
+        if (o < 6) {
+          await db.execute('ALTER TABLE items ADD COLUMN sec TEXT');
+          await db.execute('ALTER TABLE routines ADD COLUMN flex_when TEXT');
+          await db.execute('ALTER TABLE routines ADD COLUMN flex_ids TEXT');
+          await db.execute(flexSql);
+          await db.execute(linkSql);
+          await seedFlex(db);
+          for (final r in await db.query('items', where: "muscle IS NULL OR muscle='Other'")) {
+            final g = guess(r['name'] as String);
+            if (g != 'Other') await db.update('items', {'muscle': g}, where: 'id=?', whereArgs: [r['id']]);
+          }
+          for (final r in await db.query('sets', where: "muscle IS NULL OR muscle='Other'")) {
+            final g = guess(r['ex'] as String);
+            if (g != 'Other') await db.update('sets', {'muscle': g}, where: 'id=?', whereArgs: [r['id']]);
+          }
+        }
         if (o < 2) await seed(db, fresh: false);
       },
     );
@@ -191,6 +217,30 @@ class DB {
     ];
     for (var i = 0; i < w.length; i++) {
       await db.insert('warmups', {'name': w[i][0], 'amt': w[i][1], 'kind': w[i][2], 'pos': i});
+    }
+  }
+
+  static Future<void> seedFlex(Database db) async {
+    if ((await db.query('flex')).isNotEmpty) return;
+    const w = [
+      ['Hamstring stretch', 30],
+      ['Quad stretch', 30],
+      ['Hip flexor stretch', 30],
+      ['Butterfly stretch', 30],
+      ['Pigeon pose', 40],
+      ['Cossack stretch', 30],
+      ['Calf stretch', 30],
+      ['Cross-body shoulder stretch', 30],
+      ['Doorway chest stretch', 30],
+      ['Thoracic rotation', 30],
+      ['Cat-cow', 30],
+      ['Child pose', 40],
+      ['Leg swings front', 20],
+      ['Leg swings side', 20],
+      ['Hip circles', 20],
+    ];
+    for (final e in w) {
+      await db.insert('flex', {'name': e[0], 'url': '', 'amt': e[1], 'kind': 'time', 'note': ''});
     }
   }
 
@@ -225,6 +275,83 @@ class DB {
 }
 
 Future<Rows> warmList() async => (await DB.d.query('warmups', orderBy: 'pos, id')).toList();
+
+Future<Rows> flexAll() async => (await DB.d.query('flex', orderBy: 'id')).toList();
+
+Future<Map<String, Object?>> flexPlan(int? rid) async {
+  final none = <String, Object?>{'when': 'none', 'rows': <Map<String, Object?>>[]};
+  if (rid == null) return none;
+  final r = await DB.d.query('routines', where: 'id=?', whereArgs: [rid]);
+  if (r.isEmpty) return none;
+  final w = (r.first['flex_when'] as String?) ?? 'none';
+  final ids = <int>[];
+  for (final x in ((r.first['flex_ids'] as String?) ?? '').split(',')) {
+    final n = int.tryParse(x);
+    if (n != null) ids.add(n);
+  }
+  final all = await flexAll();
+  final rows = <Map<String, Object?>>[];
+  for (final i in ids) {
+    for (final f in all) {
+      if (f['id'] == i) rows.add(f);
+    }
+  }
+  return {'when': w, 'rows': rows};
+}
+
+Future<void> runSession(BuildContext c, String name, Rows items, {int? rid}) async {
+  final fx = await flexPlan(rid);
+  final rows = fx['rows'] as Rows;
+  final when = fx['when'] as String;
+  if (!c.mounted) return;
+  if (when == 'before' && rows.isNotEmpty) {
+    await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => FlexSessionPage('Flexibility · before', rows)));
+    if (!c.mounted) return;
+  }
+  final done = await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => WorkoutPage(name, items)));
+  if (done == true && when == 'after' && rows.isNotEmpty && c.mounted) {
+    await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => FlexSessionPage('Flexibility · after', rows)));
+  }
+}
+
+Future<void> openLink(BuildContext c, String url) async {
+  var u = url.trim();
+  if (u.isEmpty) return;
+  if (!u.startsWith('http')) u = 'https://$u';
+  var ok = false;
+  try {
+    ok = await launchUrl(Uri.parse(u), mode: LaunchMode.externalApplication);
+  } catch (_) {}
+  if (!ok && c.mounted) {
+    await Clipboard.setData(ClipboardData(text: u));
+    if (c.mounted) ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('Could not open the link. It was copied instead.')));
+  }
+}
+
+Future<void> saveLink(String name, String url) async {
+  if (url.trim().isEmpty) {
+    await DB.d.delete('exlinks', where: 'name=?', whereArgs: [name]);
+  } else {
+    await DB.d.insert('exlinks', {'name': name, 'url': url.trim()}, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+}
+
+Future<String?> askLink(BuildContext c, String title, String cur) {
+  final ctl = TextEditingController(text: cur);
+  return showDialog<String>(
+    context: c,
+    builder: (d) => AlertDialog(
+      backgroundColor: P.card,
+      title: Text(title),
+      content: TextField(controller: ctl, keyboardType: TextInputType.url, decoration: fld('YouTube link')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
+        if (cur.isNotEmpty) TextButton(onPressed: () => Navigator.pop(d, ''), child: const Text('Remove')),
+        TextButton(onPressed: () => Navigator.pop(d, ctl.text.trim()), child: const Text('Save')),
+      ],
+    ),
+  );
+}
 
 Future<Map<String, Object?>?> planFor(int wd, int slot) async {
   final s = await DB.d.query('schedule', where: 'day=? AND slot=?', whereArgs: [wd, slot]);
@@ -276,10 +403,10 @@ class St {
 }
 
 // ---------- backup (data + photos in one file) ----------
-const bkTables = ['kv', 'routines', 'items', 'workouts', 'sets', 'logins', 'schedule', 'warmups'];
+const bkTables = ['kv', 'routines', 'items', 'workouts', 'sets', 'logins', 'schedule', 'warmups', 'flex', 'exlinks'];
 
 Future<String> buildBackup() async {
-  final o = <String, Object?>{'app': 'fittrack', 'v': 4};
+  final o = <String, Object?>{'app': 'fittrack', 'v': 5};
   for (final t in bkTables) {
     o[t] = await DB.d.query(t);
   }
@@ -319,7 +446,7 @@ Future<String?> importBackup(String s) async {
     await DB.d.transaction((tx) async {
       for (final t in bkTables) {
         final list = o[t] as List?;
-        if (list == null && t == 'warmups') continue;
+        if (list == null && (t == 'warmups' || t == 'flex' || t == 'exlinks')) continue;
         await tx.delete(t);
         for (final r in (list ?? [])) {
           final m = Map<String, Object?>.from(r as Map);
@@ -800,15 +927,6 @@ class _AC extends State<AdCodeCard> {
 }
 
 // ---------- exercise library + full-screen add / edit ----------
-const exLib = [
-  ['Bench Press', 'Chest'], ['Incline Dumbbell Press', 'Chest'], ['Push-ups', 'Chest'], ['Chest Fly', 'Chest'], ['Dips', 'Chest'],
-  ['Pull-ups', 'Back'], ['Lat Pulldown', 'Back'], ['Barbell Row', 'Back'], ['Seated Cable Row', 'Back'], ['Deadlift', 'Back'],
-  ['Shoulder Press', 'Shoulders'], ['Lateral Raise', 'Shoulders'], ['Front Raise', 'Shoulders'], ['Shrugs', 'Shoulders'], ['Shoulder Taps', 'Shoulders'],
-  ['Bicep Curls', 'Arms'], ['Hammer Curls', 'Arms'], ['Tricep Dips', 'Arms'], ['Tricep Pushdown', 'Arms'], ['Skull Crushers', 'Arms'],
-  ['Squats', 'Legs'], ['Lunges', 'Legs'], ['Leg Press', 'Legs'], ['Leg Curl', 'Legs'], ['Leg Extension', 'Legs'], ['Calf Raises', 'Legs'], ['Glute Bridge', 'Legs'], ['Romanian Deadlift', 'Legs'],
-  ['Crunches', 'Core'], ['Leg Raises', 'Core'], ['Russian Twist', 'Core'], ['Bicycle Crunches', 'Core'], ['Plank', 'Core'], ['Side Plank', 'Core'],
-  ['Burpees', 'Cardio'], ['Mountain Climbers', 'Cardio'], ['Jumping Jacks', 'Cardio'], ['High Knees', 'Cardio'], ['Jump Rope', 'Cardio'], ['Running', 'Cardio'],
-];
 
 Future<List<String>?> askItem(BuildContext c) => Navigator.push<List<String>>(c, MaterialPageRoute(builder: (_) => const AddExercisePage()));
 
@@ -839,6 +957,7 @@ class _AEP extends State<AddExercisePage> {
   late bool timed;
   String muscle = 'Other';
   bool touched = false;
+  String lib = 'All';
   List<List<String>> known = [];
 
   @override
@@ -905,7 +1024,7 @@ class _AEP extends State<AddExercisePage> {
   @override
   Widget build(BuildContext context) {
     final q = n.text.trim().toLowerCase();
-    final sugg = known.where((e) => q.isEmpty || e[0].toLowerCase().contains(q)).take(14).toList();
+    final sugg = known.where((e) => (lib == 'All' || e[1] == lib) && (q.isEmpty || e[0].toLowerCase().contains(q))).take(60).toList();
     return bg(Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(backgroundColor: Colors.transparent, title: Text(widget.warm ? 'Warm-up exercise' : 'Add exercise', style: ts(20, w: FontWeight.w800))),
@@ -925,6 +1044,25 @@ class _AEP extends State<AddExercisePage> {
           },
         ),
         const SizedBox(height: 12),
+        SizedBox(
+          height: 42,
+          child: ListView(scrollDirection: Axis.horizontal, children: [
+            for (final m in ['All', ...muscles.where((x) => x != 'Other')])
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(m),
+                  selected: lib == m,
+                  showCheckmark: false,
+                  selectedColor: kG1,
+                  backgroundColor: P.card,
+                  labelStyle: ts(12, w: FontWeight.w700, c: lib == m ? Colors.black : null),
+                  onSelected: (_) => setState(() => lib = m),
+                ),
+              ),
+          ]),
+        ),
+        const SizedBox(height: 8),
         if (sugg.isNotEmpty) ...[
           Text(q.isEmpty ? 'QUICK PICK' : 'SUGGESTIONS', style: ts(11, w: FontWeight.w800, c: P.ac, ls: 1.5)),
           const SizedBox(height: 8),
@@ -1564,11 +1702,7 @@ class _WU extends State<WarmupPage> {
   }
 
   void finish() {
-    if (widget.name != null) {
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => WorkoutPage(widget.name!, widget.items)));
-    } else {
-      Navigator.pop(context);
-    }
+    Navigator.pop(context, widget.name != null);
   }
 
   @override
@@ -1733,12 +1867,14 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.4', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('FitTrack v1.5', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
                 item(context, Icons.calendar_month_rounded, 'Weekly plan', () => go(1)),
                 item(context, Icons.self_improvement_rounded, 'Warm-up', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Warm-up', const WarmupEditor())))),
+                item(context, Icons.spa_rounded, 'Flexibility', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Flexibility', const FlexPage())))),
+                item(context, Icons.menu_book_rounded, 'Exercise library', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('Exercise library', const LibraryPage())))),
                 item(context, Icons.list_alt_rounded, 'My routines', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('My routines', const RoutinesPage())))),
                 item(context, Icons.insights_rounded, 'Progress & results', () => go(2)),
                 item(context, Icons.history_rounded, 'Workout history', () => Navigator.push(context, MaterialPageRoute(builder: (_) => sub('History', const HistoryPage())))),
@@ -1785,7 +1921,7 @@ Future<void> pickRoutine(BuildContext c) async {
               final it = await DB.d.query('items', where: 'rid=?', whereArgs: [r['id']]);
               if (!c.mounted) return;
               Navigator.pop(b);
-              Navigator.push(c, MaterialPageRoute(builder: (_) => WorkoutPage(r['name'] as String, it.toList())));
+              runSession(c, r['name'] as String, it.toList(), rid: r['id'] as int);
             },
           ),
         ListTile(
@@ -1828,9 +1964,12 @@ Widget sessionCard(BuildContext c, int s, Map<String, Object?> plan, Set<Object?
       chips(mlist(it).toSet()),
       const SizedBox(height: 16),
       Row(children: [
-        Expanded(child: pbtn('Warm up', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WarmupPage(name: nm, items: it))), i: Icons.self_improvement_rounded, fill: false)),
+        Expanded(child: pbtn('Warm up', () async {
+          final ok = await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => WarmupPage(name: nm, items: it)));
+          if (ok == true && c.mounted) runSession(c, nm, it, rid: plan['id'] as int?);
+        }, i: Icons.self_improvement_rounded, fill: false)),
         const SizedBox(width: 10),
-        Expanded(child: pbtn(isDone ? 'Train again' : 'Start', () => Navigator.push(c, MaterialPageRoute(builder: (_) => WorkoutPage(nm, it))), i: Icons.play_arrow_rounded)),
+        Expanded(child: pbtn(isDone ? 'Train again' : 'Start', () => runSession(c, nm, it, rid: plan['id'] as int?), i: Icons.play_arrow_rounded)),
       ]),
     ]),
     g: P.hero,
@@ -2134,12 +2273,15 @@ class _WS extends State<WorkoutPage> {
   final Map<String, Rows> prev = {};
   final Map<String, List<double>> hb = {};
   String? prMsg;
+  String? secMsg;
+  final Map<String, String> secs = {}, links = {};
   int prs = 0;
 
   @override
   void initState() {
     super.initState();
     loadHist();
+    loadLinks();
     exs = [for (final i in widget.items) i['name'] as String];
     for (final i in widget.items) {
       final n = i['name'] as String;
@@ -2147,6 +2289,7 @@ class _WS extends State<WorkoutPage> {
       tReps[n] = i['reps'] as int;
       mus[n] = (i['muscle'] as String?) ?? guess(n);
       kinds[n] = (i['kind'] as String?) ?? (timedName(n) ? 'time' : 'reps');
+      secs[n] = (i['sec'] as String?) ?? '';
     }
     DB.kv('rest').then((v) {
       if (v != null) rest = int.tryParse(v) ?? 60;
@@ -2163,6 +2306,27 @@ class _WS extends State<WorkoutPage> {
           if (hold == tReps[exs[ei]]) HapticFeedback.heavyImpact();
         }
       });
+    });
+  }
+
+  Future<void> loadLinks() async {
+    for (final r in await DB.d.query('exlinks')) {
+      links[r['name'] as String] = (r['url'] as String?) ?? '';
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> setLink(String ex) async {
+    final v = await askLink(context, ex, links[ex] ?? '');
+    if (v == null) return;
+    await saveLink(ex, v);
+    if (!mounted) return;
+    setState(() {
+      if (v.trim().isEmpty) {
+        links.remove(ex);
+      } else {
+        links[ex] = v.trim();
+      }
     });
   }
 
@@ -2216,6 +2380,7 @@ class _WS extends State<WorkoutPage> {
         tReps[v[0]] = int.tryParse(v[2]) ?? (v[4] == 'time' ? 45 : 10);
         mus[v[0]] = v[3];
         kinds[v[0]] = v[4];
+        secs[v[0]] = exs.length > 1 ? (secs[exs[exs.length - 2]] ?? '') : '';
         ei = exs.length - 1;
         reps = 0;
         hold = 0;
@@ -2272,6 +2437,7 @@ class _WS extends State<WorkoutPage> {
         if (mounted && prMsg == shown) setState(() => prMsg = null);
       });
     }
+    String? newSec;
     setState(() {
       logged.add({'ex': ex, 'reps': v, 'kg': w, 'muscle': mus[ex] ?? 'Other', 'kind': timed ? 'time' : 'reps'});
       reps = 0;
@@ -2282,10 +2448,20 @@ class _WS extends State<WorkoutPage> {
       if (doneEx(ex) && ei < exs.length - 1) {
         ei++;
         moved = true;
+        final ns = secs[exs[ei]] ?? '';
+        if (ns.isNotEmpty && ns != (secs[ex] ?? '')) newSec = ns;
       }
     });
     HapticFeedback.mediumImpact();
-    if (moved) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ex done · next: ${exs[ei]}')));
+    if (newSec != null) {
+      final shown = newSec;
+      HapticFeedback.heavyImpact();
+      setState(() => secMsg = shown);
+      Future.delayed(const Duration(seconds: 7), () {
+        if (mounted && secMsg == shown) setState(() => secMsg = null);
+      });
+    }
+    if (moved && newSec == null) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ex done · next: ${exs[ei]}')));
   }
 
   Future<void> finish() async {
@@ -2314,7 +2490,7 @@ class _WS extends State<WorkoutPage> {
     }
     final had = logged.isNotEmpty;
     if (!mounted) return;
-    Navigator.pop(context);
+    Navigator.pop(context, had);
     if (had) Ads.maybeShow();
   }
 
@@ -2421,13 +2597,31 @@ class _WS extends State<WorkoutPage> {
               ]),
               g: P.hero,
             ),
+          if (secMsg != null)
+            card(
+              Row(children: [
+                gicon(Icons.swap_horiz_rounded, size: 34),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('NEW SECTION', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
+                  Text(secMsg!, style: ts(20, w: FontWeight.w900)),
+                  Text('Next up: ${ex ?? ''}', style: ts(13, c: P.mu)),
+                ])),
+              ]),
+              g: P.hero,
+            ),
           if (ex == null)
             card(Text('Tap Add to choose your first exercise.', style: ts(14, c: P.mu)))
           else
             card(Column(children: [
+              if ((secs[ex] ?? '').isNotEmpty) Text('SECTION · ${secs[ex]!.toUpperCase()}', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
               Text(ex, style: ts(22, w: FontWeight.w800)),
               const SizedBox(height: 6),
               chips([mus[ex] ?? 'Other']),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                if ((links[ex] ?? '').isNotEmpty) TextButton.icon(onPressed: () => openLink(context, links[ex]!), icon: const Icon(Icons.play_circle_outline, size: 18), label: const Text('Watch technique')),
+                TextButton(onPressed: () => setLink(ex), child: Text((links[ex] ?? '').isEmpty ? 'Add video link' : 'Edit link')),
+              ]),
               if (tS != null) ...[
                 const SizedBox(height: 4),
                 Text('Target: $tS sets × ${amt(ex, tR ?? 0)}${timed ? '' : ' reps'}', style: ts(13, c: P.mu)),
@@ -2601,42 +2795,135 @@ class RoutineEditor extends StatefulWidget {
 class _RE extends State<RoutineEditor> {
   final name = TextEditingController();
   Rows items = [];
+  String curSec = '';
+  String flexWhen = 'none';
+  List<int> flexIds = [];
+  Rows flexRows = [];
 
   @override
   void initState() {
     super.initState();
+    loadFlex();
     if (widget.id != null) load();
+  }
+
+  Future<void> loadFlex() async {
+    final f = await flexAll();
+    if (mounted) setState(() => flexRows = f);
   }
 
   Future<void> load() async {
     final r = await DB.d.query('routines', where: 'id=?', whereArgs: [widget.id]);
-    final it = await DB.d.query('items', where: 'rid=?', whereArgs: [widget.id]);
+    final it = await DB.d.query('items', where: 'rid=?', whereArgs: [widget.id], orderBy: 'id');
+    final ids = <int>[];
+    for (final x in ((r.first['flex_ids'] as String?) ?? '').split(',')) {
+      final n = int.tryParse(x);
+      if (n != null) ids.add(n);
+    }
     setState(() {
       name.text = r.first['name'] as String;
+      flexWhen = (r.first['flex_when'] as String?) ?? 'none';
+      flexIds = ids;
       items = [for (final e in it) Map<String, Object?>.from(e)];
+      if (items.isNotEmpty) curSec = (items.last['sec'] as String?) ?? '';
     });
+  }
+
+  String sx(int k) => (items[k]['sec'] as String?) ?? '';
+
+  List<String> get secNames {
+    final out = <String>[];
+    for (var k = 0; k < items.length; k++) {
+      final x = sx(k);
+      if (x.isNotEmpty && !out.contains(x)) out.add(x);
+    }
+    return out;
+  }
+
+  String fname(int id) {
+    for (final f in flexRows) {
+      if (f['id'] == id) return f['name'] as String;
+    }
+    return 'Removed stretch';
   }
 
   Future<void> add() async {
     final v = await askItem(context);
     if (v != null && v[0].isNotEmpty) {
-      setState(() => items.add({'name': v[0], 'sets': int.tryParse(v[1]) ?? 3, 'reps': int.tryParse(v[2]) ?? 10, 'muscle': v[3], 'kind': v[4]}));
+      setState(() => items.add({'name': v[0], 'sets': int.tryParse(v[1]) ?? 3, 'reps': int.tryParse(v[2]) ?? 10, 'muscle': v[3], 'kind': v[4], 'sec': curSec}));
     }
+  }
+
+  Future<void> newSection() async {
+    final v = await ask(context, 'Section name', hint: 'e.g. Defence, Strength, Conditioning');
+    final t = (v ?? '').trim();
+    if (t.isNotEmpty) setState(() => curSec = t);
+  }
+
+  void move(int i, int d) {
+    final j = i + d;
+    if (j < 0 || j >= items.length) return;
+    setState(() {
+      final x = items.removeAt(i);
+      items.insert(j, x);
+    });
+  }
+
+  Future<void> pickFlex() async {
+    await loadFlex();
+    if (!mounted) return;
+    final sel = [...flexIds];
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: P.card,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (sheet) => StatefulBuilder(
+        builder: (sheet2, st) => SafeArea(
+          child: ListView(shrinkWrap: true, padding: const EdgeInsets.all(20), children: [
+            Text('Choose stretches', style: ts(20, w: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('They run in the order you tick them.', style: ts(13, c: P.mu)),
+            if (flexRows.isEmpty) Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: Text('No stretches yet. Add some from Flexibility in the menu.', style: ts(14, c: P.mu))),
+            for (final f in flexRows)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                activeColor: kG1,
+                value: sel.contains(f['id'] as int),
+                title: Text(f['name'] as String),
+                subtitle: Text(tf(f['amt'] as int)),
+                onChanged: (v) => st(() {
+                  final id = f['id'] as int;
+                  if (v == true) {
+                    if (!sel.contains(id)) sel.add(id);
+                  } else {
+                    sel.remove(id);
+                  }
+                }),
+              ),
+            const SizedBox(height: 8),
+            gbtn('Done', () => Navigator.pop(sheet2), i: Icons.check_rounded),
+          ]),
+        ),
+      ),
+    );
+    if (mounted) setState(() => flexIds = sel);
   }
 
   Future<void> save() async {
     final n = name.text.trim();
     if (n.isEmpty) return;
     int rid;
+    final fx = {'name': n, 'flex_when': flexWhen, 'flex_ids': flexIds.join(',')};
     if (widget.id == null) {
-      rid = await DB.d.insert('routines', {'name': n});
+      rid = await DB.d.insert('routines', fx);
     } else {
       rid = widget.id!;
-      await DB.d.update('routines', {'name': n}, where: 'id=?', whereArgs: [rid]);
+      await DB.d.update('routines', fx, where: 'id=?', whereArgs: [rid]);
       await DB.d.delete('items', where: 'rid=?', whereArgs: [rid]);
     }
     for (final i in items) {
-      await DB.d.insert('items', {'rid': rid, 'name': i['name'], 'sets': i['sets'], 'reps': i['reps'], 'muscle': i['muscle'], 'kind': i['kind']});
+      await DB.d.insert('items', {'rid': rid, 'name': i['name'], 'sets': i['sets'], 'reps': i['reps'], 'muscle': i['muscle'], 'kind': i['kind'], 'sec': (i['sec'] as String?) ?? ''});
     }
     tick.value++;
     if (!mounted) return;
@@ -2652,29 +2939,96 @@ class _RE extends State<RoutineEditor> {
     Navigator.pop(context);
   }
 
+  Widget secChip(String label, bool sel, VoidCallback f) => ChoiceChip(
+        label: Text(label),
+        selected: sel,
+        showCheckmark: false,
+        selectedColor: kG1,
+        backgroundColor: P.soft,
+        labelStyle: ts(13, w: FontWeight.w700, c: sel ? Colors.black : null),
+        onSelected: (_) => f(),
+      );
+
   @override
-  Widget build(BuildContext context) => bg(Scaffold(
-        backgroundColor: Colors.transparent,
-        appBar: AppBar(backgroundColor: Colors.transparent, title: Text('Routine', style: ts(20, w: FontWeight.w800)), actions: [
-          if (widget.id != null) IconButton(onPressed: del, icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
-        ]),
-        body: ListView(padding: const EdgeInsets.all(20), children: [
-          TextField(controller: name, decoration: fld('Routine name')),
-          const SizedBox(height: 16),
-          for (var i = 0; i < items.length; i++)
-            card(Row(children: [
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('${items[i]['name']}', style: ts(16, w: FontWeight.w800)),
-                Text('${items[i]['sets']} sets × ${perSet(items[i])}', style: ts(14, c: P.mu)),
-                const SizedBox(height: 6),
-                chips([(items[i]['muscle'] as String?) ?? guess(items[i]['name'] as String)]),
-              ])),
-              IconButton(onPressed: () => setState(() => items.removeAt(i)), icon: Icon(Icons.close, color: P.mu)),
+  Widget build(BuildContext context) {
+    final names = secNames;
+    return bg(Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: Text('Routine', style: ts(20, w: FontWeight.w800)), actions: [
+        if (widget.id != null) IconButton(onPressed: del, icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
+      ]),
+      body: ListView(padding: const EdgeInsets.all(20), children: [
+        TextField(controller: name, decoration: fld('Routine name')),
+        const SizedBox(height: 16),
+        for (var i = 0; i < items.length; i++) ...[
+          if (sx(i).isNotEmpty && (i == 0 || sx(i - 1) != sx(i)))
+            Padding(padding: const EdgeInsets.only(top: 6, bottom: 8), child: Text('SECTION · ${sx(i).toUpperCase()}', style: ts(12, w: FontWeight.w900, c: P.ac, ls: 1.5))),
+          card(Row(children: [
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${items[i]['name']}', style: ts(16, w: FontWeight.w800)),
+              Text('${items[i]['sets']} sets × ${perSet(items[i])}', style: ts(14, c: P.mu)),
+              const SizedBox(height: 6),
+              chips([(items[i]['muscle'] as String?) ?? guess(items[i]['name'] as String)]),
             ])),
-          gbtn('Add exercise', add, i: Icons.add_rounded),
-          gbtn('Save routine', save, i: Icons.check_rounded),
-        ]),
-      ));
+            PopupMenuButton<String>(
+              icon: Icon(Icons.more_vert, color: P.mu),
+              onSelected: (v) {
+                if (v == 'up') {
+                  move(i, -1);
+                } else if (v == 'down') {
+                  move(i, 1);
+                } else if (v == 'sec') {
+                  setState(() => items[i]['sec'] = curSec);
+                } else {
+                  setState(() => items.removeAt(i));
+                }
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'up', child: Text('Move up')),
+                const PopupMenuItem(value: 'down', child: Text('Move down')),
+                PopupMenuItem(value: 'sec', child: Text(curSec.isEmpty ? 'Remove from section' : 'Put in "$curSec"')),
+                const PopupMenuItem(value: 'del', child: Text('Delete')),
+              ],
+            ),
+          ])),
+        ],
+        card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('ADD TO SECTION', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            secChip('No section', curSec.isEmpty, () => setState(() => curSec = '')),
+            for (final x in names) secChip(x, curSec == x, () => setState(() => curSec = x)),
+            if (curSec.isNotEmpty && !names.contains(curSec)) secChip(curSec, true, () {}),
+            ActionChip(avatar: const Icon(Icons.add, size: 18), label: const Text('New section'), backgroundColor: P.soft, onPressed: newSection),
+          ]),
+          const SizedBox(height: 8),
+          Text('Exercises run top to bottom. When a section ends, the workout switches to the next one by itself.', style: ts(12, c: P.mu)),
+        ])),
+        gbtn('Add exercise', add, i: Icons.add_rounded),
+        card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('FLEXIBILITY FOR THIS SESSION', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            secChip('None', flexWhen == 'none', () => setState(() => flexWhen = 'none')),
+            secChip('Before workout', flexWhen == 'before', () => setState(() => flexWhen = 'before')),
+            secChip('After workout', flexWhen == 'after', () => setState(() => flexWhen = 'after')),
+          ]),
+          if (flexWhen != 'none') ...[
+            const SizedBox(height: 8),
+            for (final id in flexIds)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(fname(id)),
+                trailing: IconButton(onPressed: () => setState(() => flexIds.remove(id)), icon: Icon(Icons.close, color: P.mu)),
+              ),
+            TextButton.icon(onPressed: pickFlex, icon: const Icon(Icons.add), label: const Text('Choose stretches')),
+          ],
+        ])),
+        gbtn('Save routine', save, i: Icons.check_rounded),
+      ]),
+    ));
+  }
 }
 
 // ---------- stats ----------
@@ -3139,7 +3493,286 @@ class _PP extends State<ProfilePage> {
       ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('FitTrack v1.4 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('FitTrack v1.5 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+    ]);
+  }
+}
+
+
+// ---------- flexibility ----------
+class FlexPage extends StatelessWidget {
+  const FlexPage({super.key});
+  @override
+  Widget build(BuildContext context) => Async<Rows>(
+        flexAll,
+        (c, rows) => ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          Padding(padding: const EdgeInsets.only(bottom: 12), child: Text('Your stretch library. Add a YouTube link to each stretch so you can see how it is done. Attach stretches to any routine, before or after the workout.', style: ts(14, c: P.mu))),
+          gbtn('Add stretch', () => Navigator.push(c, MaterialPageRoute(builder: (_) => const FlexEditPage(null))), i: Icons.add_rounded),
+          for (final r in rows)
+            GestureDetector(
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => FlexEditPage(r))),
+              child: card(Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('${r['name']}', style: ts(16, w: FontWeight.w800)),
+                  const SizedBox(height: 4),
+                  Text('${tf(r['amt'] as int)}${((r['url'] as String?) ?? '').isNotEmpty ? ' · video linked' : ''}', style: ts(13, c: P.mu)),
+                ])),
+                if (((r['url'] as String?) ?? '').isNotEmpty) IconButton(onPressed: () => openLink(c, r['url'] as String), icon: Icon(Icons.play_circle_fill_rounded, color: P.ac)),
+                Icon(Icons.edit_outlined, color: P.mu, size: 18),
+              ])),
+            ),
+        ]),
+      );
+}
+
+class FlexEditPage extends StatefulWidget {
+  final Map<String, Object?>? row;
+  const FlexEditPage(this.row, {super.key});
+  @override
+  State<FlexEditPage> createState() => _FE();
+}
+
+class _FE extends State<FlexEditPage> {
+  late final TextEditingController n, u, note;
+  late int amt;
+
+  @override
+  void initState() {
+    super.initState();
+    final r = widget.row;
+    n = TextEditingController(text: (r?['name'] as String?) ?? '');
+    u = TextEditingController(text: (r?['url'] as String?) ?? '');
+    note = TextEditingController(text: (r?['note'] as String?) ?? '');
+    amt = (r?['amt'] as int?) ?? 30;
+  }
+
+  @override
+  void dispose() {
+    n.dispose();
+    u.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    final name = n.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a stretch name.')));
+      return;
+    }
+    final v = {'name': name, 'url': u.text.trim(), 'amt': amt, 'kind': 'time', 'note': note.text.trim()};
+    if (widget.row == null) {
+      await DB.d.insert('flex', v);
+    } else {
+      await DB.d.update('flex', v, where: 'id=?', whereArgs: [widget.row!['id']]);
+    }
+    tick.value++;
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  Future<void> del() async {
+    await DB.d.delete('flex', where: 'id=?', whereArgs: [widget.row!['id']]);
+    tick.value++;
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) => bg(Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(backgroundColor: Colors.transparent, title: Text(widget.row == null ? 'New stretch' : 'Edit stretch', style: ts(20, w: FontWeight.w800)), actions: [
+          if (widget.row != null) IconButton(onPressed: del, icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
+        ]),
+        body: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          TextField(controller: n, textCapitalization: TextCapitalization.sentences, decoration: fld('Stretch name')),
+          const SizedBox(height: 12),
+          TextField(controller: u, keyboardType: TextInputType.url, decoration: fld('YouTube link (optional)')),
+          const SizedBox(height: 12),
+          stepper('Seconds', amt, (v) => setState(() => amt = v), step: 5, unit: 's'),
+          TextField(controller: note, maxLines: 3, decoration: fld('Notes (how to do it)')),
+          const SizedBox(height: 20),
+          gbtn('Save', save, i: Icons.check_rounded),
+        ]),
+      ));
+}
+
+class FlexSessionPage extends StatefulWidget {
+  final String title;
+  final Rows rows;
+  const FlexSessionPage(this.title, this.rows, {super.key});
+  @override
+  State<FlexSessionPage> createState() => _FX();
+}
+
+class _FX extends State<FlexSessionPage> {
+  int i = 0, left = 0;
+  bool running = false;
+  Timer? t;
+
+  Map<String, Object?> get cur => widget.rows[i];
+
+  @override
+  void initState() {
+    super.initState();
+    left = cur['amt'] as int;
+    t = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || !running) return;
+      setState(() {
+        left--;
+        if (left <= 0) {
+          HapticFeedback.heavyImpact();
+          if (i < widget.rows.length - 1) {
+            i++;
+            left = cur['amt'] as int;
+          } else {
+            left = 0;
+            running = false;
+          }
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    t?.cancel();
+    super.dispose();
+  }
+
+  void go(int d) {
+    final j = i + d;
+    if (j < 0 || j >= widget.rows.length) return;
+    setState(() {
+      i = j;
+      left = cur['amt'] as int;
+      running = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final r = cur;
+    final total = r['amt'] as int;
+    final url = (r['url'] as String?) ?? '';
+    final note = (r['note'] as String?) ?? '';
+    final last = i == widget.rows.length - 1;
+    return bg(Scaffold(
+      backgroundColor: Colors.transparent,
+      body: SafeArea(
+        child: ListView(padding: const EdgeInsets.all(20), children: [
+          Row(children: [
+            IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
+            Expanded(child: Text(widget.title, style: ts(20, w: FontWeight.w800))),
+            TextButton(onPressed: () => Navigator.pop(context), child: Text('DONE', style: ts(14, w: FontWeight.w900, c: P.ac))),
+          ]),
+          const SizedBox(height: 8),
+          card(Column(children: [
+            Text('STRETCH ${i + 1} OF ${widget.rows.length}', style: ts(11, w: FontWeight.w900, c: P.ac, ls: 1.5)),
+            const SizedBox(height: 8),
+            Text('${r['name']}', textAlign: TextAlign.center, style: ts(24, w: FontWeight.w900)),
+            if (note.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(note, textAlign: TextAlign.center, style: ts(14, c: P.mu)),
+            ],
+            const SizedBox(height: 12),
+            ShaderMask(shaderCallback: (b) => kGrad.createShader(b), child: Text(fmt(left), style: ts(72, w: FontWeight.w900, c: Colors.white))),
+            gbar(total == 0 ? 0 : (total - left) / total, h: 10),
+            const SizedBox(height: 14),
+            if (url.isNotEmpty) TextButton.icon(onPressed: () => openLink(context, url), icon: const Icon(Icons.play_circle_outline), label: const Text('Watch how to do it')),
+            gbtn(running ? 'Pause' : (left < total && left > 0 ? 'Resume' : 'Start'), () => setState(() {
+                  if (left <= 0) left = total;
+                  running = !running;
+                }), i: running ? Icons.pause_rounded : Icons.play_arrow_rounded),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              TextButton(onPressed: i > 0 ? () => go(-1) : null, child: const Text('Previous')),
+              TextButton(onPressed: last ? () => Navigator.pop(context) : () => go(1), child: Text(last ? 'Finish' : 'Next')),
+            ]),
+          ])),
+          const SizedBox(height: 4),
+          ttl('Up next'),
+          for (var k = i + 1; k < widget.rows.length; k++)
+            ListTile(dense: true, contentPadding: EdgeInsets.zero, title: Text('${widget.rows[k]['name']}'), trailing: Text(tf(widget.rows[k]['amt'] as int), style: ts(13, c: P.mu))),
+        ]),
+      ),
+    ));
+  }
+}
+
+// ---------- exercise library ----------
+class LibraryPage extends StatefulWidget {
+  const LibraryPage({super.key});
+  @override
+  State<LibraryPage> createState() => _LB();
+}
+
+class _LB extends State<LibraryPage> {
+  String q = '', m = 'All';
+  Map<String, String> links = {};
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    final r = await DB.d.query('exlinks');
+    if (!mounted) return;
+    setState(() => links = {for (final x in r) x['name'] as String: (x['url'] as String?) ?? ''});
+  }
+
+  Future<void> edit(String name) async {
+    final v = await askLink(context, name, links[name] ?? '');
+    if (v == null) return;
+    await saveLink(name, v);
+    await load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = exLib.where((e) => (m == 'All' || e[1] == m) && (q.isEmpty || e[0].toLowerCase().contains(q))).toList();
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+        child: TextField(decoration: fld('Search ${exLib.length} exercises'), onChanged: (v) => setState(() => q = v.trim().toLowerCase())),
+      ),
+      SizedBox(
+        height: 46,
+        child: ListView(padding: const EdgeInsets.symmetric(horizontal: 20), scrollDirection: Axis.horizontal, children: [
+          for (final x in ['All', ...muscles.where((y) => y != 'Other')])
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: ChoiceChip(
+                label: Text(x),
+                selected: m == x,
+                showCheckmark: false,
+                selectedColor: kG1,
+                backgroundColor: P.card,
+                labelStyle: ts(12, w: FontWeight.w700, c: m == x ? Colors.black : null),
+                onSelected: (_) => setState(() => m = x),
+              ),
+            ),
+        ]),
+      ),
+      Padding(padding: const EdgeInsets.fromLTRB(20, 4, 20, 4), child: Align(alignment: Alignment.centerLeft, child: Text('${rows.length} shown · tap one to add or edit its video link', style: ts(12, c: P.mu)))),
+      Expanded(
+        child: ListView.builder(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
+          itemCount: rows.length,
+          itemBuilder: (c, k) {
+            final e = rows[k];
+            final url = links[e[0]] ?? '';
+            return ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(e[0], style: ts(15, w: FontWeight.w700)),
+              subtitle: Text(e[1], style: ts(12, c: mc(e[1]))),
+              trailing: url.isNotEmpty ? IconButton(onPressed: () => openLink(c, url), icon: Icon(Icons.play_circle_fill_rounded, color: P.ac)) : Icon(Icons.link_rounded, color: P.mu, size: 18),
+              onTap: () => edit(e[0]),
+            );
+          },
+        ),
+      ),
     ]);
   }
 }

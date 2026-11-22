@@ -1,3 +1,10 @@
+FitTrack v1.5
+- Workout sections: group exercises in a routine (e.g. Strength, Defence). The workout switches section automatically with a banner.
+- Flexibility: stretch library with YouTube links; attach stretches to each routine, before or after the workout.
+- Exercise library: 693 built-in exercises incl. new Combat and Mobility groups; filter chips when adding an exercise.
+- Video link on any exercise (workout screen or Exercise library).
+- Keeps v1.4.2 fixes (single APK, no-shrink build).
+
 FitTrack v1.4.2: fixes startup crash (R8 stripped WorkManager database). Release build now has minify off.
 
 FitTrack v1.4
