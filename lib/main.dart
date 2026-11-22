@@ -135,10 +135,10 @@ class DB {
   static Future<void> init() async {
     d = await openDatabase(
       p.join(await getDatabasesPath(), 'fittrack.db'),
-      version: 6,
+      version: 7,
       onCreate: (db, v) async {
         await db.execute('CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT)');
-        await db.execute('CREATE TABLE routines(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, flex_when TEXT, flex_ids TEXT)');
+        await db.execute('CREATE TABLE routines(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, flex_when TEXT, flex_ids TEXT, music TEXT)');
         await db.execute('CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, name TEXT, sets INTEGER, reps INTEGER, muscle TEXT, kind TEXT, sec TEXT)');
         await db.execute('CREATE TABLE workouts(id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT, ts INTEGER, routine TEXT, secs INTEGER)');
         await db.execute('CREATE TABLE sets(id INTEGER PRIMARY KEY AUTOINCREMENT, wid INTEGER, ex TEXT, reps INTEGER, kg REAL, muscle TEXT, kind TEXT)');
@@ -186,10 +186,12 @@ class DB {
           await db.execute(warmSql);
           await seedWarm(db);
         }
+        if (o < 7 && o >= 6) await db.execute('ALTER TABLE routines ADD COLUMN music TEXT');
         if (o < 6) {
           await db.execute('ALTER TABLE items ADD COLUMN sec TEXT');
           await db.execute('ALTER TABLE routines ADD COLUMN flex_when TEXT');
           await db.execute('ALTER TABLE routines ADD COLUMN flex_ids TEXT');
+          await db.execute('ALTER TABLE routines ADD COLUMN music TEXT');
           await db.execute(flexSql);
           await db.execute(linkSql);
           await seedFlex(db);
@@ -308,7 +310,13 @@ Future<void> runSession(BuildContext c, String name, Rows items, {int? rid}) asy
     await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => FlexSessionPage('Flexibility · before', rows)));
     if (!c.mounted) return;
   }
-  final done = await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => WorkoutPage(name, items)));
+  var music = '';
+  if (rid != null) {
+    final mr = await DB.d.query('routines', columns: ['music'], where: 'id=?', whereArgs: [rid]);
+    if (mr.isNotEmpty) music = (mr.first['music'] as String?) ?? '';
+  }
+  if (!c.mounted) return;
+  final done = await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => WorkoutPage(name, items, music: music)));
   if (done == true && when == 'after' && rows.isNotEmpty && c.mounted) {
     await Navigator.push<bool>(c, MaterialPageRoute<bool>(builder: (_) => FlexSessionPage('Flexibility · after', rows)));
   }
@@ -2255,7 +2263,8 @@ class WeekPage extends StatelessWidget {
 class WorkoutPage extends StatefulWidget {
   final String name;
   final Rows items;
-  const WorkoutPage(this.name, this.items, {super.key});
+  final String music;
+  const WorkoutPage(this.name, this.items, {this.music = '', super.key});
   @override
   State<WorkoutPage> createState() => _WS();
 }
@@ -2597,6 +2606,11 @@ class _WS extends State<WorkoutPage> {
               ]),
               g: P.hero,
             ),
+          if (widget.music.isNotEmpty)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(onPressed: () => openLink(context, widget.music), icon: const Icon(Icons.music_note_rounded, size: 18), label: const Text('Music')),
+            ),
           if (secMsg != null)
             card(
               Row(children: [
@@ -2797,6 +2811,7 @@ class _RE extends State<RoutineEditor> {
   Rows items = [];
   String curSec = '';
   String flexWhen = 'none';
+  final music = TextEditingController();
   List<int> flexIds = [];
   Rows flexRows = [];
 
@@ -2823,6 +2838,7 @@ class _RE extends State<RoutineEditor> {
     setState(() {
       name.text = r.first['name'] as String;
       flexWhen = (r.first['flex_when'] as String?) ?? 'none';
+      music.text = (r.first['music'] as String?) ?? '';
       flexIds = ids;
       items = [for (final e in it) Map<String, Object?>.from(e)];
       if (items.isNotEmpty) curSec = (items.last['sec'] as String?) ?? '';
@@ -2914,7 +2930,7 @@ class _RE extends State<RoutineEditor> {
     final n = name.text.trim();
     if (n.isEmpty) return;
     int rid;
-    final fx = {'name': n, 'flex_when': flexWhen, 'flex_ids': flexIds.join(',')};
+    final fx = {'name': n, 'flex_when': flexWhen, 'flex_ids': flexIds.join(','), 'music': music.text.trim()};
     if (widget.id == null) {
       rid = await DB.d.insert('routines', fx);
     } else {
@@ -2959,6 +2975,8 @@ class _RE extends State<RoutineEditor> {
       ]),
       body: ListView(padding: const EdgeInsets.all(20), children: [
         TextField(controller: name, decoration: fld('Routine name')),
+        const SizedBox(height: 12),
+        TextField(controller: music, keyboardType: TextInputType.url, decoration: fld('Music link (Spotify playlist, optional)')),
         const SizedBox(height: 16),
         for (var i = 0; i < items.length; i++) ...[
           if (sx(i).isNotEmpty && (i == 0 || sx(i - 1) != sx(i)))

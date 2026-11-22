@@ -1,3 +1,5 @@
+v1.5.2: Music button in workouts (paste a Spotify playlist link per routine).
+
 Vytron Fit v1.5.1: app renamed from FitTrack (display name only; package id and data unchanged).
 
 FitTrack v1.5
