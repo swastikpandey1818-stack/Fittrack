@@ -1,3 +1,5 @@
+v1.5.3: exercise library expanded to 2000+ (Glutes and Calves merged into Legs).
+
 v1.5.2: Music button in workouts (paste a Spotify playlist link per routine).
 
 Vytron Fit v1.5.1: app renamed from FitTrack (display name only; package id and data unchanged).
@@ -5,7 +7,7 @@ Vytron Fit v1.5.1: app renamed from FitTrack (display name only; package id and 
 FitTrack v1.5
 - Workout sections: group exercises in a routine (e.g. Strength, Defence). The workout switches section automatically with a banner.
 - Flexibility: stretch library with YouTube links; attach stretches to each routine, before or after the workout.
-- Exercise library: 693 built-in exercises incl. new Combat and Mobility groups; filter chips when adding an exercise.
+- Exercise library: 2000+ built-in exercises incl. new Combat and Mobility groups; filter chips when adding an exercise.
 - Video link on any exercise (workout screen or Exercise library).
 - Keeps v1.4.2 fixes (single APK, no-shrink build).
 
