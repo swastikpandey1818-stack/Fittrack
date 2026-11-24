@@ -346,14 +346,14 @@ String? ytId(String url) {
   return m?.group(1);
 }
 
-Future<void> openLink(BuildContext c, String url) async {
+Future<void> openLink(BuildContext c, String url, {bool workout = false}) async {
   var u = url.trim();
   if (u.isEmpty) return;
   if (!u.startsWith('http')) u = 'https://$u';
   final id = ytId(u);
   if (id != null && (await DB.kv('embed')) != '0') {
     if (!c.mounted) return;
-    await Navigator.push<void>(c, MaterialPageRoute<void>(builder: (_) => VideoPage(url: u, id: id)));
+    await Navigator.push<void>(c, MaterialPageRoute<void>(builder: (_) => VideoPage(url: u, id: id, workout: workout)));
     return;
   }
   await openExternal(c, u);
@@ -490,9 +490,11 @@ Future<String?> importBackup(String s) async {
         final list = o[t] as List?;
         if (list == null && (t == 'warmups' || t == 'flex' || t == 'exlinks')) continue;
         await tx.delete(t);
+        final cols = (await tx.rawQuery('PRAGMA table_info($t)')).map((c) => c['name'] as String).toSet();
         for (final r in (list ?? [])) {
           final m = Map<String, Object?>.from(r as Map);
           if (t == 'schedule') m.putIfAbsent('slot', () => 0);
+          m.removeWhere((k, _) => !cols.contains(k));
           await tx.insert(t, m);
         }
       }
@@ -511,6 +513,102 @@ Future<String?> importBackup(String s) async {
     return null;
   } catch (e) {
     return 'Could not read that backup file.';
+  }
+}
+
+// ---------- AI workout builder (v1.6.2) ----------
+const aiPrompt = r"""You are a strength, boxing and flexibility coach building workouts for my app "Vytron Fit".
+Reply with ONLY one JSON object inside a single code block and no other text, in exactly this format:
+{"app":"vytron-fit-ai","routines":[{"name":"Routine name","items":[{"name":"Exercise name","sets":3,"reps":12,"kind":"reps","muscle":"Chest","section":"Strength","url":"https://www.youtube.com/watch?v=VIDEOID"}]}]}
+Rules:
+- kind is "reps" or "time". For "time" (planks, holds, stretches) reps means seconds.
+- muscle must be one of: Chest, Back, Shoulders, Arms, Legs, Core, Cardio, Combat, Mobility, Other.
+- section groups exercises inside one workout (for example Strength, then Defence). Keep exercises of the same section together, in the order I do them.
+- url must be a real YouTube tutorial link for that exercise that allows embedding (a normal youtube.com/watch?v= link). If you are not sure a link is real, leave url empty. Never invent a video id.
+- Reuse my exercise names and links from the list below when it is the same exercise.
+- Keep my current routines unless I ask you to change them.
+MY REQUEST: (write here what you want, for example: a 4-day plan with boxing defence after strength)
+MY CURRENT ROUTINES:
+""";
+
+Future<String> aiExport() async {
+  final links = {for (final x in await DB.d.query('exlinks')) x['name'] as String: (x['url'] as String?) ?? ''};
+  final out = <Map<String, Object?>>[];
+  for (final r in await DB.d.query('routines')) {
+    final it = await DB.d.query('items', where: 'rid=?', whereArgs: [r['id']], orderBy: 'id');
+    final list = <Map<String, Object?>>[];
+    for (final i in it) {
+      final n = i['name'] as String;
+      list.add({
+        'name': n,
+        'sets': i['sets'],
+        'reps': i['reps'],
+        'kind': i['kind'] ?? 'reps',
+        'muscle': i['muscle'] ?? guess(n),
+        'section': i['sec'] ?? '',
+        if ((links[n] ?? '').isNotEmpty) 'url': links[n],
+      });
+    }
+    out.add({'name': r['name'], 'items': list});
+  }
+  return jsonEncode({'app': 'vytron-fit-ai', 'routines': out});
+}
+
+Future<String> aiImport(String text) async {
+  try {
+    final t = text.trim();
+    final a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a < 0 || b <= a) return 'No workout found in that text.';
+    final o = jsonDecode(t.substring(a, b + 1));
+    if (o is! Map || o['routines'] is! List) return 'No routines found in that text.';
+    final have = {for (final r in await DB.d.query('routines')) (r['name'] as String).toLowerCase()};
+    var nr = 0, ne = 0, nl = 0;
+    Future<void> link(String n, String u) async {
+      if (n.isEmpty || u.trim().isEmpty) return;
+      await saveLink(n, u);
+      nl++;
+    }
+
+    for (final r in (o['routines'] as List)) {
+      if (r is! Map) continue;
+      var name = '${r['name'] ?? 'AI workout'}'.trim();
+      if (name.isEmpty) name = 'AI workout';
+      while (have.contains(name.toLowerCase())) {
+        name = '$name (AI)';
+      }
+      have.add(name.toLowerCase());
+      final rid = await DB.d.insert('routines', {'name': name});
+      nr++;
+      for (final i in ((r['items'] as List?) ?? const [])) {
+        if (i is! Map) continue;
+        final n = '${i['name'] ?? ''}'.trim();
+        if (n.isEmpty) continue;
+        final k = '${i['kind'] ?? ''}'.toLowerCase();
+        final timed = k == 'time' || k == 'seconds' || (k.isEmpty && timedName(n));
+        final mu = '${i['muscle'] ?? ''}';
+        await DB.d.insert('items', {
+          'rid': rid,
+          'name': n,
+          'sets': int.tryParse('${i['sets']}') ?? 3,
+          'reps': int.tryParse('${i['reps']}') ?? (timed ? 45 : 12),
+          'muscle': muscles.contains(mu) ? mu : guess(n),
+          'kind': timed ? 'time' : 'reps',
+          'sec': '${i['section'] ?? i['sec'] ?? ''}'.trim(),
+        });
+        ne++;
+        await link(n, '${i['url'] ?? ''}');
+      }
+    }
+    final lk = o['links'];
+    if (lk is Map) {
+      for (final e in lk.entries) {
+        await link('${e.key}', '${e.value}');
+      }
+    }
+    tick.value++;
+    return nr == 0 ? 'No routines found in that text.' : 'Added $nr routine${nr == 1 ? '' : 's'}, $ne exercises, $nl video links.';
+  } catch (e) {
+    return 'Could not read that. Ask the AI to reply in the exact format.';
   }
 }
 
@@ -2003,7 +2101,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6.2', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -2407,7 +2505,7 @@ class _WS extends State<WorkoutPage> {
   final Map<String, int> tSets = {}, tReps = {};
   final Map<String, String> mus = {}, kinds = {};
   int ei = 0, reps = 0, hold = 0, restLeft = 0, restTot = 60, rest = 60;
-  bool paused = false, holding = false;
+  bool paused = false, holding = false, videoOpen = false;
   final sw = Stopwatch()..start();
   Timer? t;
   final logged = <Map<String, Object?>>[];
@@ -2439,11 +2537,11 @@ class _WS extends State<WorkoutPage> {
     t = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
-        if (restLeft > 0) {
+        if (restLeft > 0 && !videoOpen) {
           restLeft--;
           if (restLeft == 0) HapticFeedback.heavyImpact();
         }
-        if (holding && exs.isNotEmpty) {
+        if (holding && !videoOpen && exs.isNotEmpty) {
           hold++;
           if (hold == tReps[exs[ei]]) HapticFeedback.heavyImpact();
         }
@@ -2456,6 +2554,19 @@ class _WS extends State<WorkoutPage> {
       links[r['name'] as String] = (r['url'] as String?) ?? '';
     }
     if (mounted) setState(() {});
+  }
+
+  Future<void> watch(String url) async {
+    final wasPaused = paused;
+    setState(() {
+      videoOpen = true;
+      holding = false;
+    });
+    if (!wasPaused) sw.stop();
+    await openLink(context, url, workout: true);
+    if (!mounted) return;
+    setState(() => videoOpen = false);
+    if (!wasPaused) sw.start();
   }
 
   Future<void> setLink(String ex) async {
@@ -2766,7 +2877,7 @@ class _WS extends State<WorkoutPage> {
               const SizedBox(height: 6),
               chips([mus[ex] ?? 'Other']),
               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                if ((links[ex] ?? '').isNotEmpty) TextButton.icon(onPressed: () => openLink(context, links[ex]!), icon: const Icon(Icons.play_circle_outline, size: 18), label: const Text('Watch technique')),
+                if ((links[ex] ?? '').isNotEmpty) TextButton.icon(onPressed: () => watch(links[ex]!), icon: const Icon(Icons.play_circle_fill_rounded, size: 20), label: const Text('Play video (pauses timers)')),
                 TextButton(onPressed: () => setLink(ex), child: Text((links[ex] ?? '').isEmpty ? 'Add video link' : 'Edit link')),
               ]),
               if (tS != null) ...[
@@ -3574,6 +3685,26 @@ class _PP extends State<ProfilePage> {
     await after(await importBackup(clip));
   }
 
+  Future<void> aiCopy() async {
+    final data = await aiExport();
+    await Clipboard.setData(ClipboardData(text: aiPrompt + data));
+    if (mounted) msg('Copied. Paste it into your AI chat.');
+  }
+
+  Future<void> aiPaste() async {
+    final clip = (await Clipboard.getData('text/plain'))?.text ?? '';
+    final r = await aiImport(clip);
+    if (mounted) msg(r);
+  }
+
+  Future<void> aiFile() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.any);
+    final path = r?.files.single.path;
+    if (path == null) return;
+    final res = await aiImport(await File(path).readAsString());
+    if (mounted) msg(res);
+  }
+
   Widget field(String l, TextEditingController c, String k, {bool n = false}) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: TextField(
@@ -3688,9 +3819,20 @@ class _PP extends State<ProfilePage> {
         ]),
         Center(child: TextButton(onPressed: restoreText, child: Text('Restore from copied text (v1.2 backup)', style: ts(12, c: P.mu)))),
       ])),
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ttl('AI workout builder', 'Let ChatGPT or any AI build your routines'),
+        Text('1. Tap Copy and paste it into the AI chat.\n2. Write what you want after "MY REQUEST".\n3. Copy the AI reply, then tap Add from copied text. New routines and video links are added. Nothing is deleted.', style: ts(12, c: P.mu)),
+        const SizedBox(height: 12),
+        gbtn('Copy prompt + my routines', aiCopy, i: Icons.auto_awesome_rounded),
+        Row(children: [
+          Expanded(child: sbtn('Add from copied text', aiPaste, i: Icons.content_paste_rounded)),
+          const SizedBox(width: 10),
+          Expanded(child: sbtn('Add from file', aiFile, i: Icons.upload_file_rounded)),
+        ]),
+      ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('Vytron Fit v1.6 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('Vytron Fit v1.6.2 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
@@ -4067,7 +4209,8 @@ class _LB extends State<LibraryPage> {
 // ---------- in-app video player (v1.6) ----------
 class VideoPage extends StatefulWidget {
   final String url, id;
-  const VideoPage({super.key, required this.url, required this.id});
+  final bool workout;
+  const VideoPage({super.key, required this.url, required this.id, this.workout = false});
   @override
   State<VideoPage> createState() => _VP();
 }
@@ -4080,7 +4223,7 @@ class _VP extends State<VideoPage> {
   @override
   void initState() {
     super.initState();
-    ctl = YoutubePlayerController.fromVideoId(videoId: widget.id, autoPlay: true, params: const YoutubePlayerParams(showFullscreenButton: false, mute: false));
+    ctl = YoutubePlayerController.fromVideoId(videoId: widget.id, autoPlay: true, params: const YoutubePlayerParams(showFullscreenButton: false, mute: false, origin: 'https://www.youtube-nocookie.com'));
   }
 
   @override
@@ -4117,7 +4260,7 @@ class _VP extends State<VideoPage> {
             Expanded(child: Slider(value: vol, min: 0, max: 100, activeColor: P.ac, onChanged: setVol)),
             SizedBox(width: 44, child: Text(muted ? 'Mute' : '${vol.round()}%', textAlign: TextAlign.right, style: ts(13, w: FontWeight.w700))),
           ])),
-          Text('Plays here with sound, no sign-up needed. Your phone volume buttons work too. If a video will not play (the owner may block embedding), use the button below.', style: ts(12, c: P.mu)),
+          Text('${widget.workout ? 'Your workout timer and rest timer are paused. Go back and everything continues where you left off.\n\n' : ''}Plays here with sound, no sign-up needed. Your phone volume buttons work too. If a video will not play (the owner may block embedding), use the button below.', style: ts(12, c: P.mu)),
           const SizedBox(height: 14),
           sbtn('Open in YouTube', () => openExternal(context, widget.url), i: Icons.open_in_new_rounded),
         ]),
