@@ -54,7 +54,7 @@ jobs:
           flutter build apk --release --no-shrink --split-debug-info=build/symbols
       - uses: actions/upload-artifact@v4
         with:
-          name: fittrack-v1.5-apk
+          name: fittrack-v1.5.4-apk
           path: build/app/outputs/flutter-apk/app-release.apk
   smoke:
     needs: build
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: fittrack-v1.5-apk
+          name: fittrack-v1.5.4-apk
           path: apks
       - name: Enable KVM
         run: |

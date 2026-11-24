@@ -1,3 +1,5 @@
+Vytron Fit v1.5.4: new 'App look' switch in Profile (Settings): Classic or Vytron Gold (obsidian #050807, emerald #00D878, champagne gold #D6B66C) with new home, header, bottom navigation and an animated reveal when switching. All data and features unchanged.
+
 v1.5.3: exercise library expanded to 2000+ (Glutes and Calves merged into Legs).
 
 v1.5.2: Music button in workouts (paste a Spotify playlist link per routine).

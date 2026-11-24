@@ -20,17 +20,24 @@ import 'exercise_data.dart';
 // ---------- theme / palette ----------
 class P {
   static bool dark = true;
-  static Color get bg => dark ? const Color(0xFF040706) : const Color(0xFFF1F7F3);
-  static Color get card => dark ? const Color(0xFF0D1511) : Colors.white;
-  static Color get soft => dark ? const Color(0xFF16201B) : const Color(0xFFE4EEE8);
-  static Color get mu => dark ? const Color(0xFF86A194) : const Color(0xFF55705F);
-  static Color get ac => dark ? const Color(0xFF00E676) : const Color(0xFF008F4A);
-  static Color get line => dark ? const Color(0x2200E676) : const Color(0x3300A152);
-  static Color get hdr => dark ? const Color(0xFF0B2A1B) : const Color(0xFFCDEFDC);
-  static Color get nav => dark ? const Color(0xF2111B16) : const Color(0xF2FFFFFF);
-  static LinearGradient get hero => dark
-      ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF14432C), Color(0xFF0D1511)])
-      : const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFFD3F4E1), Colors.white]);
+  static bool vy = false; // Vytron Gold look
+  static const gold = Color(0xFFD6B66C);
+  static const emerald = Color(0xFF00D878);
+  static Color get bg => vy ? const Color(0xFF050807) : dark ? const Color(0xFF040706) : const Color(0xFFF1F7F3);
+  static Color get card => vy ? const Color(0xFF0A100D) : dark ? const Color(0xFF0D1511) : Colors.white;
+  static Color get soft => vy ? const Color(0xFF131B17) : dark ? const Color(0xFF16201B) : const Color(0xFFE4EEE8);
+  static Color get mu => vy ? const Color(0xFF9BA7A1) : dark ? const Color(0xFF86A194) : const Color(0xFF55705F);
+  static Color get ac => vy ? emerald : dark ? const Color(0xFF00E676) : const Color(0xFF008F4A);
+  static Color get line => vy ? const Color(0x33D6B66C) : dark ? const Color(0x2200E676) : const Color(0x3300A152);
+  static Color get hdr => vy ? const Color(0xFF07130D) : dark ? const Color(0xFF0B2A1B) : const Color(0xFFCDEFDC);
+  static Color get nav => vy ? const Color(0xF20A100D) : dark ? const Color(0xF2111B16) : const Color(0xF2FFFFFF);
+  static LinearGradient get hero => vy
+      ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF0C2A1D), Color(0xFF0A100D)])
+      : dark
+          ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF14432C), Color(0xFF0D1511)])
+          : const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFFD3F4E1), Colors.white]);
+  static LinearGradient get grad => vy ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF00E58A), Color(0xFF00A862)]) : kGrad;
+  static LinearGradient get igrad => vy ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFFF0D894), Color(0xFFC9A55A)]) : kGrad;
 }
 
 const kG1 = Color(0xFF00E676);
@@ -42,13 +49,14 @@ const muscles = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Cardio',
 const mColors = [Color(0xFF00E676), Color(0xFF00BFA5), Color(0xFFB2FF59), Color(0xFF64FFDA), Color(0xFF69F0AE), Color(0xFF76FF03), Color(0xFF1DE9B6), Color(0xFFFFB300), Color(0xFF40C4FF), Color(0xFF86A194)];
 final tick = ValueNotifier<int>(0);
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.dark);
+final styleMode = ValueNotifier<int>(0); // 0 = Classic, 1 = Vytron Gold
 
 typedef Rows = List<Map<String, Object?>>;
 
 TextStyle ts(double s, {FontWeight w = FontWeight.w400, Color? c, double? ls}) => TextStyle(fontSize: s, fontWeight: w, color: c, letterSpacing: ls);
 
 void applyMode(ThemeMode m) {
-  P.dark = m == ThemeMode.dark || (m == ThemeMode.system && WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark);
+  P.dark = P.vy || m == ThemeMode.dark || (m == ThemeMode.system && WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark);
   SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: P.dark ? Brightness.light : Brightness.dark,
@@ -63,7 +71,16 @@ Future<void> setTheme(ThemeMode m, {bool save = true}) async {
   if (save) await DB.setKv('theme', m == ThemeMode.light ? 'light' : m == ThemeMode.system ? 'system' : 'dark');
 }
 
+Future<void> setStyle(int v, {bool save = true}) async {
+  P.vy = v == 1;
+  styleMode.value = v;
+  applyMode(themeMode.value);
+  if (save) await DB.setKv('ui', v == 1 ? 'vytron' : 'classic');
+}
+
 Future<void> loadTheme() async {
+  P.vy = (await DB.kv('ui')) == 'vytron';
+  styleMode.value = P.vy ? 1 : 0;
   final v = await DB.kv('theme');
   await setTheme(v == 'light' ? ThemeMode.light : v == 'system' ? ThemeMode.system : ThemeMode.dark, save: false);
 }
@@ -521,16 +538,19 @@ void main() {
 ThemeData mkTheme(bool d) => ThemeData(
       useMaterial3: true,
       brightness: d ? Brightness.dark : Brightness.light,
-      scaffoldBackgroundColor: d ? const Color(0xFF040706) : const Color(0xFFF1F7F3),
-      colorScheme: d ? const ColorScheme.dark(primary: kG1, secondary: kG2, surface: Color(0xFF0D1511)) : const ColorScheme.light(primary: Color(0xFF008F4A), secondary: kG2, surface: Colors.white),
+      scaffoldBackgroundColor: P.vy ? const Color(0xFF050807) : d ? const Color(0xFF040706) : const Color(0xFFF1F7F3),
+      colorScheme: P.vy ? const ColorScheme.dark(primary: P.emerald, secondary: P.gold, surface: Color(0xFF0A100D)) : d ? const ColorScheme.dark(primary: kG1, secondary: kG2, surface: Color(0xFF0D1511)) : const ColorScheme.light(primary: Color(0xFF008F4A), secondary: kG2, surface: Colors.white),
     );
 
 class App extends StatelessWidget {
   const App({super.key});
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
-        valueListenable: themeMode,
-        builder: (_, m, __) => MaterialApp(title: 'Vytron Fit', debugShowCheckedModeBanner: false, themeMode: m, theme: mkTheme(false), darkTheme: mkTheme(true), home: const Splash()),
+  Widget build(BuildContext context) => ValueListenableBuilder<int>(
+        valueListenable: styleMode,
+        builder: (_, __s, ___s) => ValueListenableBuilder<ThemeMode>(
+          valueListenable: themeMode,
+          builder: (_, m, __) => MaterialApp(title: 'Vytron Fit', debugShowCheckedModeBanner: false, themeMode: P.vy ? ThemeMode.dark : m, theme: mkTheme(false), darkTheme: mkTheme(true), home: const Splash()),
+        ),
       );
 }
 
@@ -550,7 +570,9 @@ Widget card(Widget child, {Gradient? g}) => Container(
       margin: const EdgeInsets.only(bottom: 14),
       padding: const EdgeInsets.all(1.2),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0x9900E676), Color(0x1A00E676), Color(0x5500A152)]),
+        gradient: P.vy
+            ? const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0x99D6B66C), Color(0x1A00D878), Color(0x66D6B66C)])
+            : const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0x9900E676), Color(0x1A00E676), Color(0x5500A152)]),
         borderRadius: BorderRadius.circular(24),
         boxShadow: P.dark ? null : const [BoxShadow(color: Color(0x1A00A152), blurRadius: 18, offset: Offset(0, 6))],
       ),
@@ -568,7 +590,7 @@ Widget gbtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
         height: 54,
         alignment: Alignment.center,
         margin: const EdgeInsets.only(bottom: 14),
-        decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(18), boxShadow: const [BoxShadow(color: Color(0x5500E676), blurRadius: 18, offset: Offset(0, 6))]),
+        decoration: BoxDecoration(gradient: P.grad, borderRadius: BorderRadius.circular(18), boxShadow: const [BoxShadow(color: Color(0x5500E676), blurRadius: 18, offset: Offset(0, 6))]),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (i != null) ...[Icon(i, color: Colors.black), const SizedBox(width: 8)],
           Text(t, style: ts(16, w: FontWeight.w800, c: Colors.black)),
@@ -596,7 +618,7 @@ Widget pbtn(String t, VoidCallback f, {IconData? i, bool fill = true}) => Gestur
         height: 46,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          gradient: fill ? kGrad : null,
+          gradient: fill ? P.grad : null,
           color: fill ? null : P.soft,
           borderRadius: BorderRadius.circular(14),
           border: fill ? null : Border.all(color: kG1.withOpacity(.5)),
@@ -608,7 +630,7 @@ Widget pbtn(String t, VoidCallback f, {IconData? i, bool fill = true}) => Gestur
       ),
     );
 
-Widget gicon(IconData i, {double size = 24}) => ShaderMask(shaderCallback: (r) => kGrad.createShader(r), child: Icon(i, size: size, color: Colors.white));
+Widget gicon(IconData i, {double size = 24}) => ShaderMask(shaderCallback: (r) => P.igrad.createShader(r), child: Icon(i, size: size, color: Colors.white));
 
 Widget gbar(double v, {double h = 8}) => ClipRRect(
       borderRadius: BorderRadius.circular(h),
@@ -616,7 +638,7 @@ Widget gbar(double v, {double h = 8}) => ClipRRect(
         height: h,
         color: P.soft,
         alignment: Alignment.centerLeft,
-        child: FractionallySizedBox(widthFactor: v.clamp(0.0, 1.0).toDouble(), child: Container(decoration: const BoxDecoration(gradient: kGrad))),
+        child: FractionallySizedBox(widthFactor: v.clamp(0.0, 1.0).toDouble(), child: Container(decoration: BoxDecoration(gradient: P.grad))),
       ),
     );
 
@@ -646,7 +668,7 @@ Widget chips(Iterable<String> ms) => Wrap(spacing: 6, runSpacing: 6, children: [
 Widget ttl(String t, [String? s]) => Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(children: [
-        Container(width: 4, height: s == null ? 18 : 32, decoration: BoxDecoration(gradient: kGrad, borderRadius: BorderRadius.circular(4))),
+        Container(width: 4, height: s == null ? 18 : 32, decoration: BoxDecoration(gradient: P.vy ? P.igrad : kGrad, borderRadius: BorderRadius.circular(4))),
         const SizedBox(width: 10),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1815,7 +1837,7 @@ class _SplashState extends State<Splash> {
           Align(
             alignment: const Alignment(0, .72),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              ShaderMask(shaderCallback: (r) => kGrad.createShader(r), child: Text('FITTRACK', style: ts(38, w: FontWeight.w900, c: Colors.white, ls: 6))),
+              ShaderMask(shaderCallback: (r) => P.igrad.createShader(r), child: Text('VYTRON FIT', style: ts(38, w: FontWeight.w900, c: Colors.white, ls: 6))),
               const SizedBox(height: 6),
               Text('Train. Track. Transform.', style: ts(14, c: const Color(0xFF86A194), ls: 1.5)),
             ]),
@@ -1832,8 +1854,94 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int i = 0;
-  static const titles = ['Vytron Fit', 'Weekly plan', 'Progress', 'Transformation', 'Profile'];
+  static const titles = ['Vytron Fit', 'Weekly plan', 'Progress', 'Transformation', 'Profile', 'Goals & records'];
+  final sk = GlobalKey<ScaffoldState>();
   void go(int k) => setState(() => i = k);
+
+  PreferredSizeWidget vyBar() => AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        toolbarHeight: 66,
+        iconTheme: const IconThemeData(color: P.gold),
+        titleSpacing: 0,
+        title: Row(children: [
+          ShaderMask(shaderCallback: (r) => P.igrad.createShader(r), child: const Icon(Icons.fitness_center_rounded, size: 30, color: Colors.white)),
+          const SizedBox(width: 10),
+          Container(width: 1, height: 34, color: P.gold.withOpacity(.45)),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            ShaderMask(shaderCallback: (r) => P.igrad.createShader(r), child: Text('VYTRON', style: ts(22, w: FontWeight.w900, c: Colors.white, ls: 1).copyWith(fontStyle: FontStyle.italic, height: 1))),
+            Text('Fit', style: ts(15, w: FontWeight.w800, c: P.emerald).copyWith(fontStyle: FontStyle.italic, height: 1.1)),
+          ]),
+        ]),
+        actions: [
+          GestureDetector(
+            onTap: () => go(4),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), border: Border.all(color: P.gold, width: 1.2)),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.workspace_premium_rounded, size: 16, color: P.gold),
+                Text('PRO', style: ts(10, w: FontWeight.w900, c: P.gold)),
+              ]),
+            ),
+          ),
+          const SizedBox(width: 10),
+          GestureDetector(
+            onTap: () => go(4),
+            child: Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: P.gold, width: 1.4)),
+              child: const Icon(Icons.person_rounded, color: P.gold),
+            ),
+          ),
+          const SizedBox(width: 14),
+        ],
+      );
+
+  Widget vyNav() {
+    const ic = [Icons.home_rounded, Icons.fitness_center_rounded, Icons.bar_chart_rounded, Icons.emoji_events_rounded, Icons.more_horiz_rounded];
+    const lb = ['Home', 'Workout', 'Progress', 'Goals', 'More'];
+    const ix = [0, 1, 2, 5, -1];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+      child: Container(
+        height: 72,
+        decoration: BoxDecoration(color: P.nav, borderRadius: BorderRadius.circular(36), border: Border.all(color: P.gold.withOpacity(.35)), boxShadow: const [BoxShadow(color: Color(0x3300D878), blurRadius: 24)]),
+        child: Row(children: [
+          for (var k = 0; k < 5; k++)
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  if (ix[k] < 0) {
+                    sk.currentState?.openDrawer();
+                  } else {
+                    go(ix[k]);
+                  }
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  margin: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: i == ix[k] ? P.emerald.withOpacity(.12) : null,
+                    borderRadius: BorderRadius.circular(30),
+                    border: i == ix[k] ? Border.all(color: P.emerald.withOpacity(.7)) : null,
+                  ),
+                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(ic[k], size: 26, color: i == ix[k] ? P.emerald : P.mu),
+                    const SizedBox(height: 2),
+                    Text(lb[k], style: ts(11, w: FontWeight.w700, c: i == ix[k] ? P.emerald : P.mu)),
+                  ]),
+                ),
+              ),
+            ),
+        ]),
+      ),
+    );
+  }
 
   Widget nav(int k) {
     const ic = [Icons.home_rounded, Icons.calendar_month_rounded, Icons.insights_rounded, Icons.photo_camera_rounded, Icons.person_rounded];
@@ -1859,14 +1967,17 @@ class _ShellState extends State<Shell> {
       );
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
+  Widget build(BuildContext context) => ValueListenableBuilder<int>(
+      valueListenable: styleMode,
+      builder: (context, _s, __s) => ValueListenableBuilder<ThemeMode>(
         valueListenable: themeMode,
         builder: (context, _, __) {
-          final pages = [HomePage(onBackup: () => go(4)), const WeekPage(), const StatsPage(), const TransformPage(), const ProfilePage()];
+          final pages = [HomePage(onBackup: () => go(4), onGo: go), const WeekPage(), const StatsPage(), const TransformPage(), const ProfilePage(), const BestPage()];
           return bg(Scaffold(
+            key: sk,
             backgroundColor: Colors.transparent,
             extendBody: true,
-            appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, title: Text(titles[i], style: ts(20, w: FontWeight.w800))),
+            appBar: P.vy ? vyBar() : AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, title: Text(titles[i], style: ts(20, w: FontWeight.w800))),
             drawer: Drawer(
               backgroundColor: P.bg,
               child: ListView(padding: EdgeInsets.zero, children: [
@@ -1875,7 +1986,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.5', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.5.4', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -1893,8 +2004,8 @@ class _ShellState extends State<Shell> {
                 item(context, Icons.person_rounded, 'Profile & backup', () => go(4)),
               ]),
             ),
-            body: pages[i],
-            bottomNavigationBar: Padding(
+            body: KeyedSubtree(key: ValueKey('${P.vy}${P.dark}'), child: pages[i]),
+            bottomNavigationBar: P.vy ? vyNav() : Padding(
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
               child: Container(
                 height: 70,
@@ -1904,7 +2015,7 @@ class _ShellState extends State<Shell> {
             ),
           ));
         },
-      );
+      ));
 }
 
 // ---------- home ----------
@@ -2004,7 +2115,8 @@ Widget weekDot(DateTime d, St st, DateTime now) {
 
 class HomePage extends StatelessWidget {
   final VoidCallback onBackup;
-  const HomePage({super.key, required this.onBackup});
+  final void Function(int)? onGo;
+  const HomePage({super.key, required this.onBackup, this.onGo});
 
   Widget streakPill(IconData ic, int n, String l) => Expanded(
         child: Container(
@@ -2049,6 +2161,9 @@ class HomePage extends StatelessWidget {
           final greet = now.hour < 12 ? 'Good morning' : now.hour < 17 ? 'Good afternoon' : 'Good evening';
           final left = goal - week;
           return ListView(padding: const EdgeInsets.fromLTRB(20, 4, 20, 120), children: [
+            if (P.vy)
+              ...vyTop(c, name: name, greet: greet, total: st.ws.length, week: week, streak: ws, secs: secs, go: onGo)
+            else
             ClipRRect(
               borderRadius: BorderRadius.circular(26),
               child: SizedBox(
@@ -2153,6 +2268,7 @@ class HomePage extends StatelessWidget {
               ttl('Minutes per day', 'last 7 days'),
               SizedBox(height: 150, width: double.infinity, child: CustomPaint(painter: BarsPainter([for (final x in ds) double.parse(st.mins(dk(x)).toStringAsFixed(1))], [for (final x in ds) wd[x.weekday - 1]]))),
             ])),
+            if (P.vy) vyBanner(),
           ]);
         },
       );
@@ -3452,6 +3568,31 @@ class _PP extends State<ProfilePage> {
         ),
       );
 
+  Widget lookChip(String l, String sub, IconData ic, int v) {
+    final on = (P.vy ? 1 : 0) == v;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => switchLook(context, v),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+          decoration: BoxDecoration(
+            gradient: on ? P.grad : null,
+            color: on ? null : P.soft,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: on ? Colors.transparent : P.line),
+          ),
+          child: Column(children: [
+            Icon(ic, color: on ? Colors.black : P.mu),
+            const SizedBox(height: 4),
+            Text(l, style: ts(13, w: FontWeight.w900, c: on ? Colors.black : null)),
+            Text(sub, textAlign: TextAlign.center, style: ts(10, c: on ? Colors.black87 : P.mu)),
+          ]),
+        ),
+      ),
+    );
+  }
+
   Widget themeChip(String l, IconData ic, ThemeMode m) {
     final on = themeMode.value == m;
     return Expanded(
@@ -3484,6 +3625,14 @@ class _PP extends State<ProfilePage> {
         field('Weekly workout goal', goal, 'goal', n: true),
       ])),
       card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ttl('App look', 'Switch the whole design. Your data stays the same.'),
+        Row(children: [
+          lookChip('Classic', 'Current design', Icons.grid_view_rounded, 0),
+          lookChip('Vytron Gold', 'Obsidian · emerald · gold', Icons.workspace_premium_rounded, 1),
+        ]),
+      ])),
+      if (!P.vy)
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ttl('Appearance'),
         Row(children: [
           themeChip('Dark', Icons.dark_mode_rounded, ThemeMode.dark),
@@ -3511,7 +3660,7 @@ class _PP extends State<ProfilePage> {
       ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('Vytron Fit v1.5 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('Vytron Fit v1.5.4 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
@@ -3793,4 +3942,250 @@ class _LB extends State<LibraryPage> {
       ),
     ]);
   }
+}
+
+
+// ---------- Vytron Gold look (v1.6) ----------
+List<Widget> vyTop(BuildContext c, {required String name, required String greet, required int total, required int week, required int streak, required int secs, void Function(int)? go}) {
+  void open(Widget w) => Navigator.push(c, MaterialPageRoute(builder: (_) => w));
+  Widget big(IconData ic, String t, String sb, bool goldEdge, VoidCallback f) => Expanded(
+        child: GestureDetector(
+          onTap: f,
+          child: Container(
+            height: 122,
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [(goldEdge ? P.gold : P.emerald).withOpacity(.16), P.card]),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: goldEdge ? P.gold : P.emerald, width: 1.3),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Icon(ic, size: 30, color: goldEdge ? P.gold : P.emerald),
+                const Spacer(),
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: goldEdge ? P.gold : P.emerald),
+                  child: const Icon(Icons.chevron_right_rounded, size: 20, color: Colors.black),
+                ),
+              ]),
+              const Spacer(),
+              Text(t, style: ts(16, w: FontWeight.w800)),
+              Text(sb, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(11, c: P.mu)),
+            ]),
+          ),
+        ),
+      );
+  Widget stat(IconData ic, String v, String l, Color col) => Expanded(
+        child: Column(children: [
+          Icon(ic, size: 24, color: col),
+          const SizedBox(height: 4),
+          FittedBox(fit: BoxFit.scaleDown, child: Text(v, style: ts(22, w: FontWeight.w900))),
+          Text(l, textAlign: TextAlign.center, style: ts(11, c: P.mu)),
+        ]),
+      );
+  Widget qa(IconData ic, String l, VoidCallback f, bool gold) => Expanded(
+        child: GestureDetector(
+          onTap: f,
+          child: Container(
+            height: 86,
+            margin: const EdgeInsets.all(4),
+            decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(18), border: Border.all(color: P.emerald.withOpacity(.45))),
+            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Icon(ic, size: 28, color: gold ? P.gold : P.emerald),
+              const SizedBox(height: 6),
+              Text(l, textAlign: TextAlign.center, style: ts(12, w: FontWeight.w700)),
+            ]),
+          ),
+        ),
+      );
+  final who = name.isEmpty ? 'ATHLETE' : name.toUpperCase();
+  return [
+    ClipRRect(
+      borderRadius: BorderRadius.circular(26),
+      child: SizedBox(
+        height: 236,
+        child: Stack(fit: StackFit.expand, children: [
+          Image.asset('${img}home_banner.jpg', fit: BoxFit.cover, alignment: Alignment.centerRight),
+          Container(decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.centerLeft, end: Alignment.centerRight, colors: [Color(0xFF050807), Color(0xE6050807), Color(0x33050807)]))),
+          Container(decoration: BoxDecoration(gradient: RadialGradient(center: const Alignment(1, -.6), radius: 1.1, colors: [P.emerald.withOpacity(.25), Colors.transparent]))),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+              Text('${greet.toUpperCase()}, $who', maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(11, w: FontWeight.w800, c: P.gold, ls: 1.5)),
+              const SizedBox(height: 8),
+              FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft, child: Text('Stronger Today.', style: ts(34, w: FontWeight.w800, c: Colors.white).copyWith(fontStyle: FontStyle.italic))),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: ShaderMask(
+                  shaderCallback: (r) => const LinearGradient(colors: [P.emerald, P.gold]).createShader(r),
+                  child: Text('Greater Tomorrow.', style: ts(34, w: FontWeight.w800, c: Colors.white).copyWith(fontStyle: FontStyle.italic)),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(height: 2, width: 190, decoration: const BoxDecoration(gradient: LinearGradient(colors: [P.gold, Color(0x00D6B66C)]))),
+              const SizedBox(height: 12),
+              Text('TRAIN  ·  TRACK  ·  ACHIEVE', style: ts(11, c: P.mu, ls: 3)),
+            ]),
+          ),
+        ]),
+      ),
+    ),
+    const SizedBox(height: 14),
+    Row(children: [
+      big(Icons.fitness_center_rounded, 'Start Workout', 'Choose from ${exLib.length}+ exercises', true, () => pickRoutine(c)),
+      big(Icons.trending_up_rounded, 'View Progress', 'Track your fitness journey', false, () => go?.call(2)),
+    ]),
+    const SizedBox(height: 14),
+    Container(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(22), border: Border.all(color: P.emerald.withOpacity(.45))),
+      child: Row(children: [
+        stat(Icons.emoji_events_rounded, '$total', 'Total Workouts', P.gold),
+        Container(width: 1, height: 44, color: P.gold.withOpacity(.35)),
+        stat(Icons.calendar_month_rounded, '$week', 'This Week', P.emerald),
+        Container(width: 1, height: 44, color: P.gold.withOpacity(.35)),
+        stat(Icons.local_fire_department_rounded, '$streak', 'Day Streak', P.gold),
+        Container(width: 1, height: 44, color: P.gold.withOpacity(.35)),
+        stat(Icons.schedule_rounded, secs >= 3600 ? '${(secs / 3600).toStringAsFixed(1)}h' : '${(secs / 60).round()}m', 'Total Training', P.emerald),
+      ]),
+    ),
+    const SizedBox(height: 20),
+    Row(children: [
+      Text('//', style: ts(20, w: FontWeight.w900, c: P.gold)),
+      const SizedBox(width: 8),
+      Text('Quick Actions', style: ts(18, w: FontWeight.w800)),
+      const Spacer(),
+      GestureDetector(
+        onTap: () => Scaffold.of(c).openDrawer(),
+        child: Text('See All →', style: ts(13, w: FontWeight.w700, c: P.gold)),
+      ),
+    ]),
+    const SizedBox(height: 8),
+    Row(children: [
+      qa(Icons.menu_book_rounded, 'Exercise\nLibrary', () => open(sub('Exercise library', const LibraryPage())), true),
+      qa(Icons.event_note_rounded, 'Workout\nPlans', () => open(sub('My routines', const RoutinesPage())), false),
+      qa(Icons.bar_chart_rounded, 'Track\nStats', () => go?.call(2), false),
+    ]),
+    Row(children: [
+      qa(Icons.spa_rounded, 'Flexibility', () => open(sub('Flexibility', const FlexPage())), false),
+      qa(Icons.emoji_events_rounded, 'Personal\nRecords', () => go?.call(5), false),
+      qa(Icons.settings_rounded, 'Settings', () => go?.call(4), true),
+    ]),
+    const SizedBox(height: 14),
+  ];
+}
+
+Widget vyBanner() => Container(
+      margin: const EdgeInsets.only(top: 4),
+      height: 96,
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: [P.gold.withOpacity(.22), P.card, P.emerald.withOpacity(.22)]),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: P.gold.withOpacity(.7), width: 1.3),
+      ),
+      child: Row(children: [
+        const Icon(Icons.emoji_events_rounded, size: 46, color: P.gold),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Push Your Limits', style: ts(22, w: FontWeight.w800, c: P.gold).copyWith(fontStyle: FontStyle.italic)),
+            Text('Be the best version of yourself', style: ts(13, c: P.mu)),
+          ]),
+        ),
+      ]),
+    );
+
+// Animated switch between the two looks: a dark veil sweeps in, the look changes, then the shadow moves out.
+Future<void> switchLook(BuildContext c, int v) async {
+  if ((P.vy ? 1 : 0) == v) return;
+  final ov = Overlay.of(c, rootOverlay: true);
+  late OverlayEntry e;
+  e = OverlayEntry(builder: (_) => StyleSweep(toVy: v == 1, onMid: () => setStyle(v), onDone: () => e.remove()));
+  ov.insert(e);
+}
+
+class StyleSweep extends StatefulWidget {
+  final bool toVy;
+  final VoidCallback onMid, onDone;
+  const StyleSweep({super.key, required this.toVy, required this.onMid, required this.onDone});
+  @override
+  State<StyleSweep> createState() => _SS();
+}
+
+class _SS extends State<StyleSweep> with SingleTickerProviderStateMixin {
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500));
+  bool fired = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ac.addListener(() {
+      if (!fired && ac.value >= .5) {
+        fired = true;
+        widget.onMid();
+      }
+    });
+    ac.forward().whenComplete(widget.onDone);
+  }
+
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+        child: Material(
+          type: MaterialType.transparency,
+          child: AnimatedBuilder(
+            animation: ac,
+            builder: (_, __) => Stack(fit: StackFit.expand, children: [
+              CustomPaint(painter: SweepPainter(ac.value, widget.toVy)),
+              Center(
+                child: Opacity(
+                  opacity: math.sin(math.pi * ac.value).clamp(0.0, 1.0).toDouble(),
+                  child: Text(widget.toVy ? 'VYTRON FIT' : 'CLASSIC', style: ts(30, w: FontWeight.w900, c: widget.toVy ? P.gold : const Color(0xFF00E676), ls: 6)),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      );
+}
+
+class SweepPainter extends CustomPainter {
+  final double t;
+  final bool toVy;
+  SweepPainter(this.t, this.toVy);
+
+  @override
+  void paint(Canvas cv, Size s) {
+    final diag = math.sqrt(s.width * s.width + s.height * s.height);
+    final center = Offset(s.width / 2, s.height * .55);
+    final veil = Paint()..color = const Color(0xFF050807);
+    final edge = toVy ? P.gold : const Color(0xFF00E676);
+    final inFirst = t < .5;
+    final k = Curves.easeInOut.transform(((inFirst ? t : t - .5) / .5).clamp(0.0, 1.0).toDouble());
+    final r = diag * k;
+    if (inFirst) {
+      cv.drawCircle(center, r, veil);
+    } else {
+      final path = Path.combine(PathOperation.difference, Path()..addRect(Rect.fromLTWH(0, 0, s.width, s.height)), Path()..addOval(Rect.fromCircle(center: center, radius: r)));
+      cv.drawPath(path, veil);
+    }
+    if (r > 2) {
+      cv.drawCircle(center, r + 18, Paint()..style = PaintingStyle.stroke..strokeWidth = 46..color = const Color(0x99000000)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 26));
+      cv.drawCircle(center, r, Paint()..style = PaintingStyle.stroke..strokeWidth = 5..color = edge.withOpacity(.9)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8));
+      cv.drawCircle(center, r, Paint()..style = PaintingStyle.stroke..strokeWidth = 1.6..color = edge);
+    }
+  }
+
+  @override
+  bool shouldRepaint(SweepPainter o) => o.t != t;
 }
