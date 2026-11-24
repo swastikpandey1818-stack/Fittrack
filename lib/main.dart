@@ -15,6 +15,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart' show MobileAds, Inters
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:url_launcher/url_launcher.dart' show launchUrl, LaunchMode;
+import 'package:youtube_player_iframe/youtube_player_iframe.dart' show YoutubePlayer, YoutubePlayerController, YoutubePlayerParams;
 import 'exercise_data.dart';
 
 // ---------- theme / palette ----------
@@ -23,6 +24,7 @@ class P {
   static bool vy = false; // Vytron Gold look
   static const gold = Color(0xFFD6B66C);
   static const emerald = Color(0xFF00D878);
+  static Color get goldx => (vy || dark) ? gold : const Color(0xFF9A7418);
   static Color get bg => vy ? const Color(0xFF050807) : dark ? const Color(0xFF040706) : const Color(0xFFF1F7F3);
   static Color get card => vy ? const Color(0xFF0A100D) : dark ? const Color(0xFF0D1511) : Colors.white;
   static Color get soft => vy ? const Color(0xFF131B17) : dark ? const Color(0xFF16201B) : const Color(0xFFE4EEE8);
@@ -339,10 +341,25 @@ Future<void> runSession(BuildContext c, String name, Rows items, {int? rid}) asy
   }
 }
 
+String? ytId(String url) {
+  final m = RegExp(r'(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/|v/))([A-Za-z0-9_-]{11})').firstMatch(url);
+  return m?.group(1);
+}
+
 Future<void> openLink(BuildContext c, String url) async {
   var u = url.trim();
   if (u.isEmpty) return;
   if (!u.startsWith('http')) u = 'https://$u';
+  final id = ytId(u);
+  if (id != null && (await DB.kv('embed')) != '0') {
+    if (!c.mounted) return;
+    await Navigator.push<void>(c, MaterialPageRoute<void>(builder: (_) => VideoPage(url: u, id: id)));
+    return;
+  }
+  await openExternal(c, u);
+}
+
+Future<void> openExternal(BuildContext c, String u) async {
   var ok = false;
   try {
     ok = await launchUrl(Uri.parse(u), mode: LaunchMode.externalApplication);
@@ -1986,7 +2003,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.5.4', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -3485,6 +3502,7 @@ class _PP extends State<ProfilePage> {
   St? st;
   String last = '';
   bool busy = false;
+  bool embed = true;
 
   @override
   void initState() {
@@ -3493,6 +3511,7 @@ class _PP extends State<ProfilePage> {
   }
 
   Future<void> load() async {
+    embed = (await DB.kv('embed')) != '0';
     last = await DB.kv('lastbackup') ?? '';
     name.text = await DB.kv('name') ?? '';
     rest.text = await DB.kv('rest') ?? '60';
@@ -3647,6 +3666,17 @@ class _PP extends State<ProfilePage> {
           tile(Icons.emoji_events_rounded, '${s.ws.length}', 'Workouts'),
         ]),
       const SizedBox(height: 14),
+      card(SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        activeColor: P.ac,
+        title: const Text('Play videos inside the app'),
+        subtitle: Text('YouTube links play in the app with volume control. No sign-up. Needs internet. Off = opens the YouTube app.', style: ts(12, c: P.mu)),
+        value: embed,
+        onChanged: (v) async {
+          setState(() => embed = v);
+          await DB.setKv('embed', v ? '1' : '0');
+        },
+      )),
       card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ttl('Backup & restore', last.isEmpty ? 'No backup yet' : 'Last backup: $last'),
         Text('Saves everything (routines, weekly plan, history and your photos) into one file. Share it to Google Drive, WhatsApp or Files. To restore, tap Restore and pick that file.', style: ts(12, c: P.mu)),
@@ -3660,7 +3690,7 @@ class _PP extends State<ProfilePage> {
       ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('Vytron Fit v1.5.4 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('Vytron Fit v1.6 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
@@ -3875,7 +3905,11 @@ class LibraryPage extends StatefulWidget {
 
 class _LB extends State<LibraryPage> {
   String q = '', m = 'All';
+  bool onlyAdded = false;
   Map<String, String> links = {};
+  Map<String, List<String>> used = {}; // lower-case name -> routines using it
+  Map<String, String> shown = {}; // lower-case name -> display name
+  Map<String, String> addedMuscle = {};
 
   @override
   void initState() {
@@ -3885,8 +3919,27 @@ class _LB extends State<LibraryPage> {
 
   Future<void> load() async {
     final r = await DB.d.query('exlinks');
+    final it = await DB.d.rawQuery('SELECT i.name AS name, i.muscle AS muscle, r.name AS rn FROM items i LEFT JOIN routines r ON r.id=i.rid');
+    final u = <String, List<String>>{};
+    final sh = <String, String>{};
+    final am = <String, String>{};
+    for (final x in it) {
+      final n = (x['name'] as String?) ?? '';
+      if (n.isEmpty) continue;
+      final k = n.toLowerCase();
+      sh.putIfAbsent(k, () => n);
+      am.putIfAbsent(k, () => (x['muscle'] as String?) ?? guess(n));
+      final rn = x['rn'] as String?;
+      final l = u.putIfAbsent(k, () => <String>[]);
+      if (rn != null && !l.contains(rn)) l.add(rn);
+    }
     if (!mounted) return;
-    setState(() => links = {for (final x in r) x['name'] as String: (x['url'] as String?) ?? ''});
+    setState(() {
+      links = {for (final x in r) x['name'] as String: (x['url'] as String?) ?? ''};
+      used = u;
+      shown = sh;
+      addedMuscle = am;
+    });
   }
 
   Future<void> edit(String name) async {
@@ -3896,56 +3949,183 @@ class _LB extends State<LibraryPage> {
     await load();
   }
 
+  Widget modeChip(String l, bool on, VoidCallback f, {bool gold = false}) => Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: ChoiceChip(
+          label: Text(l),
+          selected: on,
+          showCheckmark: false,
+          selectedColor: gold ? P.gold : kG1,
+          backgroundColor: P.card,
+          side: BorderSide(color: gold ? P.gold.withOpacity(.6) : P.line),
+          labelStyle: ts(13, w: FontWeight.w800, c: on ? Colors.black : (gold ? P.goldx : null)),
+          onSelected: (_) => f(),
+        ),
+      );
+
+  Widget addedView() {
+    final keys = used.keys.where((k) => q.isEmpty || k.contains(q)).toList()..sort();
+    if (keys.isEmpty) {
+      return Padding(padding: const EdgeInsets.all(30), child: Text(used.isEmpty ? 'No exercises are in your workouts yet. Add exercises to a routine and they will show here in gold.' : 'No match.', textAlign: TextAlign.center, style: ts(14, c: P.mu)));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 40),
+      itemCount: keys.length,
+      itemBuilder: (c, i) {
+        final k = keys[i];
+        final name = shown[k] ?? k;
+        final mu = addedMuscle[k] ?? 'Other';
+        final url = links[name] ?? '';
+        final rs = used[k] ?? <String>[];
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: P.card, borderRadius: BorderRadius.circular(18), border: Border.all(color: P.gold.withOpacity(.7), width: 1.2)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(Icons.bookmark_rounded, color: P.goldx, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text(name, style: ts(16, w: FontWeight.w800, c: P.goldx))),
+              Text(mu, style: ts(12, c: mc(mu))),
+            ]),
+            if (rs.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text('In: ${rs.join(', ')}', style: ts(12, c: P.mu))),
+            const SizedBox(height: 10),
+            Row(children: [
+              if (url.isNotEmpty) ...[
+                Expanded(child: pbtn('Play', () => openLink(context, url), i: Icons.play_arrow_rounded)),
+                const SizedBox(width: 8),
+              ],
+              Expanded(child: pbtn(url.isEmpty ? 'Attach my link' : 'Change link', () => edit(name), i: Icons.link_rounded, fill: false)),
+            ]),
+          ]),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final rows = exLib.where((e) => (m == 'All' || e[1] == m) && (q.isEmpty || e[0].toLowerCase().contains(q))).toList();
     return Column(children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-        child: TextField(decoration: fld('Search ${exLib.length} exercises'), onChanged: (v) => setState(() => q = v.trim().toLowerCase())),
+        child: TextField(decoration: fld(onlyAdded ? 'Search your added exercises' : 'Search ${exLib.length} exercises'), onChanged: (v) => setState(() => q = v.trim().toLowerCase())),
       ),
-      SizedBox(
-        height: 46,
-        child: ListView(padding: const EdgeInsets.symmetric(horizontal: 20), scrollDirection: Axis.horizontal, children: [
-          for (final x in ['All', ...muscles.where((y) => y != 'Other')])
-            Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: ChoiceChip(
-                label: Text(x),
-                selected: m == x,
-                showCheckmark: false,
-                selectedColor: kG1,
-                backgroundColor: P.card,
-                labelStyle: ts(12, w: FontWeight.w700, c: m == x ? Colors.black : null),
-                onSelected: (_) => setState(() => m = x),
-              ),
-            ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+        child: Row(children: [
+          modeChip('All exercises', !onlyAdded, () => setState(() => onlyAdded = false)),
+          modeChip('Already added (${used.length})', onlyAdded, () => setState(() => onlyAdded = true), gold: true),
         ]),
       ),
-      Padding(padding: const EdgeInsets.fromLTRB(20, 4, 20, 4), child: Align(alignment: Alignment.centerLeft, child: Text('${rows.length} shown · tap one to add or edit its video link', style: ts(12, c: P.mu)))),
-      Expanded(
-        child: ListView.builder(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
-          itemCount: rows.length,
-          itemBuilder: (c, k) {
-            final e = rows[k];
-            final url = links[e[0]] ?? '';
-            return ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(e[0], style: ts(15, w: FontWeight.w700)),
-              subtitle: Text(e[1], style: ts(12, c: mc(e[1]))),
-              trailing: url.isNotEmpty ? IconButton(onPressed: () => openLink(c, url), icon: Icon(Icons.play_circle_fill_rounded, color: P.ac)) : Icon(Icons.link_rounded, color: P.mu, size: 18),
-              onTap: () => edit(e[0]),
-            );
-          },
+      if (onlyAdded)
+        Expanded(child: addedView())
+      else ...[
+        SizedBox(
+          height: 46,
+          child: ListView(padding: const EdgeInsets.symmetric(horizontal: 20), scrollDirection: Axis.horizontal, children: [
+            for (final x in ['All', ...muscles.where((y) => y != 'Other')])
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(x),
+                  selected: m == x,
+                  showCheckmark: false,
+                  selectedColor: kG1,
+                  backgroundColor: P.card,
+                  labelStyle: ts(12, w: FontWeight.w700, c: m == x ? Colors.black : null),
+                  onSelected: (_) => setState(() => m = x),
+                ),
+              ),
+          ]),
         ),
-      ),
+        Padding(padding: const EdgeInsets.fromLTRB(20, 4, 20, 4), child: Align(alignment: Alignment.centerLeft, child: Text('${rows.length} shown · gold = already in your workouts · tap one to add or edit its video link', style: ts(12, c: P.mu)))),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
+            itemCount: rows.length,
+            itemBuilder: (c, k) {
+              final e = rows[k];
+              final url = links[e[0]] ?? '';
+              final isAdded = used.containsKey(e[0].toLowerCase());
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: isAdded ? Icon(Icons.bookmark_rounded, color: P.goldx) : null,
+                title: Text(e[0], style: ts(15, w: FontWeight.w700, c: isAdded ? P.goldx : null)),
+                subtitle: Text(isAdded ? '${e[1]} · already added' : e[1], style: ts(12, c: isAdded ? P.goldx : mc(e[1]))),
+                trailing: url.isNotEmpty ? IconButton(onPressed: () => openLink(c, url), icon: Icon(Icons.play_circle_fill_rounded, color: isAdded ? P.goldx : P.ac)) : Icon(Icons.link_rounded, color: P.mu, size: 18),
+                onTap: () => edit(e[0]),
+              );
+            },
+          ),
+        ),
+      ],
     ]);
   }
 }
 
+// ---------- in-app video player (v1.6) ----------
+class VideoPage extends StatefulWidget {
+  final String url, id;
+  const VideoPage({super.key, required this.url, required this.id});
+  @override
+  State<VideoPage> createState() => _VP();
+}
 
-// ---------- Vytron Gold look (v1.6) ----------
+class _VP extends State<VideoPage> {
+  late final YoutubePlayerController ctl;
+  double vol = 100;
+  bool muted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ctl = YoutubePlayerController.fromVideoId(videoId: widget.id, autoPlay: true, params: const YoutubePlayerParams(showFullscreenButton: false, mute: false));
+  }
+
+  @override
+  void dispose() {
+    ctl.close();
+    super.dispose();
+  }
+
+  void setVol(double v) {
+    setState(() {
+      vol = v;
+      muted = v < 1;
+    });
+    ctl.setVolume(v.round());
+  }
+
+  void toggleMute() {
+    setState(() {
+      muted = !muted;
+      if (!muted && vol < 1) vol = 60;
+    });
+    ctl.setVolume(muted ? 0 : vol.round());
+  }
+
+  @override
+  Widget build(BuildContext context) => bg(Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(backgroundColor: Colors.transparent, title: Text('Watch', style: ts(20, w: FontWeight.w800))),
+        body: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
+          ClipRRect(borderRadius: BorderRadius.circular(18), child: YoutubePlayer(controller: ctl, aspectRatio: 16 / 9)),
+          const SizedBox(height: 14),
+          card(Row(children: [
+            IconButton(onPressed: toggleMute, icon: Icon(muted ? Icons.volume_off_rounded : Icons.volume_up_rounded, color: P.ac)),
+            Expanded(child: Slider(value: vol, min: 0, max: 100, activeColor: P.ac, onChanged: setVol)),
+            SizedBox(width: 44, child: Text(muted ? 'Mute' : '${vol.round()}%', textAlign: TextAlign.right, style: ts(13, w: FontWeight.w700))),
+          ])),
+          Text('Plays here with sound, no sign-up needed. Your phone volume buttons work too. If a video will not play (the owner may block embedding), use the button below.', style: ts(12, c: P.mu)),
+          const SizedBox(height: 14),
+          sbtn('Open in YouTube', () => openExternal(context, widget.url), i: Icons.open_in_new_rounded),
+        ]),
+      ));
+}
+
+
+// ---------- Vytron Gold look (v1.5.4) ----------
 List<Widget> vyTop(BuildContext c, {required String name, required String greet, required int total, required int week, required int streak, required int secs, void Function(int)? go}) {
   void open(Widget w) => Navigator.push(c, MaterialPageRoute(builder: (_) => w));
   Widget big(IconData ic, String t, String sb, bool goldEdge, VoidCallback f) => Expanded(

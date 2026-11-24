@@ -1,3 +1,5 @@
+Vytron Fit v1.6: videos play inside the app (YouTube embedded player with volume, no sign-up; switch in Profile). Exercise library: gold 'Already added' marking and an 'Already added' view where you attach your own link. Muscle groups and sections are not changed.
+
 Vytron Fit v1.5.4: new 'App look' switch in Profile (Settings): Classic or Vytron Gold (obsidian #050807, emerald #00D878, champagne gold #D6B66C) with new home, header, bottom navigation and an animated reveal when switching. All data and features unchanged.
 
 v1.5.3: exercise library expanded to 2000+ (Glutes and Calves merged into Legs).
