@@ -15,6 +15,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart' show MobileAds, Inters
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:url_launcher/url_launcher.dart' show launchUrl, LaunchMode;
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart' show YoutubePlayer, YoutubePlayerController, YoutubePlayerParams;
 import 'exercise_data.dart';
 
@@ -85,6 +86,79 @@ Future<void> loadTheme() async {
   styleMode.value = P.vy ? 1 : 0;
   final v = await DB.kv('theme');
   await setTheme(v == 'light' ? ThemeMode.light : v == 'system' ? ThemeMode.system : ThemeMode.dark, save: false);
+}
+
+// ---------- voice coach (v1.6.3): the app speaks, it never listens ----------
+class Voice {
+  static final FlutterTts _t = FlutterTts();
+  static bool on = true;
+  static bool _ready = false;
+
+  static Future<void> load() async {
+    on = (await DB.kv('voice')) != '0';
+  }
+
+  static Future<void> setOn(bool v) async {
+    on = v;
+    await DB.setKv('voice', v ? '1' : '0');
+    if (!v) await stop();
+  }
+
+  static Future<void> _init() async {
+    if (_ready) return;
+    _ready = true;
+    try {
+      await _t.setLanguage('en-US');
+      await _t.setPitch(0.5);
+      await _t.setSpeechRate(0.42);
+      await _t.setVolume(1.0);
+      try {
+        await _t.setAudioAttributesForNavigation();
+      } catch (_) {}
+      final vs = await _t.getVoices;
+      if (vs is List) {
+        final all = <Map<String, String>>[];
+        for (final v in vs) {
+          if (v is Map) {
+            all.add({'name': '${v['name']}', 'locale': '${v['locale']}'});
+          }
+        }
+        const best = ['en-us-x-iom-local', 'en-us-x-iol-local', 'en-us-x-tpd-local', 'en-gb-x-rjs-local', 'en-gb-x-gbb-local', 'en-gb-x-gbd-local'];
+        Map<String, String>? pick;
+        for (final b in best) {
+          for (final v in all) {
+            if (v['name']!.toLowerCase() == b) pick = v;
+          }
+          if (pick != null) break;
+        }
+        if (pick == null) {
+          for (final v in all) {
+            final n = v['name']!.toLowerCase();
+            if (n.contains('male') && !n.contains('female') && (v['locale'] ?? '').toLowerCase().startsWith('en')) {
+              pick = v;
+              break;
+            }
+          }
+        }
+        if (pick != null) await _t.setVoice(pick);
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> say(String text) async {
+    if (!on) return;
+    try {
+      await _init();
+      await _t.stop();
+      await _t.speak(text, focus: true);
+    } catch (_) {}
+  }
+
+  static Future<void> stop() async {
+    try {
+      await _t.stop();
+    } catch (_) {}
+  }
 }
 
 String dk(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
@@ -638,6 +712,9 @@ void main() {
       await DB.init();
       await DB.d.insert('logins', {'day': dk(DateTime.now())}, conflictAlgorithm: ConflictAlgorithm.ignore);
       await loadTheme();
+      try {
+        await Voice.load();
+      } catch (_) {}
     } catch (e, st) {
       runApp(ErrorApp('$e\n\n$st'));
       return;
@@ -723,6 +800,24 @@ Widget sbtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (i != null) ...[Icon(i, color: P.ac), const SizedBox(width: 8)],
           Text(t, style: ts(16, w: FontWeight.w800, c: P.ac)),
+        ]),
+      ),
+    );
+
+Widget goldBtn(String t, VoidCallback f, {IconData? i}) => GestureDetector(
+      onTap: f,
+      child: Container(
+        height: 54,
+        alignment: Alignment.center,
+        margin: const EdgeInsets.only(top: 6, bottom: 4),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFFEBD9A4), P.gold, Color(0xFFB8963F)]),
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: const [BoxShadow(color: Color(0x44D6B66C), blurRadius: 16, offset: Offset(0, 5))],
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (i != null) ...[Icon(i, color: Colors.black), const SizedBox(width: 8)],
+          Text(t, style: ts(16, w: FontWeight.w800, c: Colors.black)),
         ]),
       ),
     );
@@ -2101,7 +2196,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6.2', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6.3', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -2534,12 +2629,20 @@ class _WS extends State<WorkoutPage> {
     DB.kv('rest').then((v) {
       if (v != null) rest = int.tryParse(v) ?? 60;
     });
+    if (exs.isNotEmpty) {
+      Future.delayed(const Duration(milliseconds: 900), () {
+        if (mounted && exs.isNotEmpty) Voice.say('Let\'s go. First exercise: ${exs[0]}.');
+      });
+    }
     t = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
         if (restLeft > 0 && !videoOpen) {
           restLeft--;
-          if (restLeft == 0) HapticFeedback.heavyImpact();
+          if (restLeft == 0) {
+            HapticFeedback.heavyImpact();
+            Voice.say(restOverMsg());
+          }
         }
         if (holding && !videoOpen && exs.isNotEmpty) {
           hold++;
@@ -2608,6 +2711,7 @@ class _WS extends State<WorkoutPage> {
   @override
   void dispose() {
     t?.cancel();
+    Voice.stop();
     kg.dispose();
     super.dispose();
   }
@@ -2617,12 +2721,21 @@ class _WS extends State<WorkoutPage> {
   bool doneEx(String ex) => tSets[ex] != null && setsOf(ex).length >= tSets[ex]!;
   String amt(String ex, int v) => isT(ex) ? tf(v) : '$v';
 
-  void pick(int i) => setState(() {
-        ei = i;
-        reps = 0;
-        hold = 0;
-        holding = false;
-      });
+  String restOverMsg() {
+    if (exs.isEmpty) return 'Rest over.';
+    final e = exs[ei];
+    return 'Rest over. $e, set ${setsOf(e).length + 1}.';
+  }
+
+  void pick(int i) {
+    setState(() {
+      ei = i;
+      reps = 0;
+      hold = 0;
+      holding = false;
+    });
+    if (i >= 0 && i < exs.length) Voice.say(exs[i]);
+  }
 
   Future<void> addEx() async {
     final v = await askItem(context);
@@ -2706,6 +2819,11 @@ class _WS extends State<WorkoutPage> {
       }
     });
     HapticFeedback.mediumImpact();
+    if (rest > 0) {
+      final nx = (moved && exs.isNotEmpty) ? ' Next up, ${exs[ei]}.' : '';
+      final sc = newSec != null ? ' New section, $newSec.' : '';
+      Voice.say('Rest. $rest seconds.$nx$sc');
+    }
     if (newSec != null) {
       final shown = newSec;
       HapticFeedback.heavyImpact();
@@ -2731,6 +2849,7 @@ class _WS extends State<WorkoutPage> {
       if (!mounted) return;
       final tot = logged.where((s) => s['kind'] != 'time').fold<int>(0, (a, s) => a + (s['reps'] as int));
       final held = logged.where((s) => s['kind'] == 'time').fold<int>(0, (a, s) => a + (s['reps'] as int));
+      Voice.say('Workout complete. Good work.');
       await showDialog<void>(
         context: context,
         builder: (d) => AlertDialog(
@@ -2770,6 +2889,14 @@ class _WS extends State<WorkoutPage> {
           Row(children: [
             IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
             Expanded(child: Text(widget.name, style: ts(20, w: FontWeight.w800))),
+            IconButton(
+              tooltip: 'Voice coach',
+              onPressed: () async {
+                await Voice.setOn(!Voice.on);
+                if (mounted) setState(() {});
+              },
+              icon: Icon(Voice.on ? Icons.volume_up_rounded : Icons.volume_off_rounded, color: P.gold),
+            ),
             TextButton(onPressed: finish, child: Text('FINISH', style: ts(14, w: FontWeight.w900, c: P.ac))),
           ]),
           const SizedBox(height: 8),
@@ -3614,6 +3741,7 @@ class _PP extends State<ProfilePage> {
   String last = '';
   bool busy = false;
   bool embed = true;
+  bool voiceOn = true;
 
   @override
   void initState() {
@@ -3623,6 +3751,7 @@ class _PP extends State<ProfilePage> {
 
   Future<void> load() async {
     embed = (await DB.kv('embed')) != '0';
+    voiceOn = Voice.on;
     last = await DB.kv('lastbackup') ?? '';
     name.text = await DB.kv('name') ?? '';
     rest.text = await DB.kv('rest') ?? '60';
@@ -3809,6 +3938,32 @@ class _PP extends State<ProfilePage> {
         },
       )),
       card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          activeColor: P.gold,
+          activeTrackColor: P.gold.withOpacity(.35),
+          title: Row(children: [
+            const Icon(Icons.record_voice_over_rounded, color: P.gold, size: 22),
+            const SizedBox(width: 10),
+            const Flexible(child: Text('Voice coach')),
+          ]),
+          subtitle: Text('A deep male voice speaks when rest starts, when rest ends and when each exercise begins, so you do not have to look at the screen. The phone only speaks. It never listens.', style: ts(12, c: P.mu)),
+          value: voiceOn,
+          onChanged: (v) async {
+            setState(() => voiceOn = v);
+            await Voice.setOn(v);
+            if (v) Voice.say('Voice coach on.');
+          },
+        ),
+        goldBtn('Test voice', () {
+          if (voiceOn) {
+            Voice.say('Rest. 60 seconds. Next up, bench press.');
+          } else {
+            msg('Turn Voice coach on first.');
+          }
+        }, i: Icons.volume_up_rounded),
+      ])),
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ttl('Backup & restore', last.isEmpty ? 'No backup yet' : 'Last backup: $last'),
         Text('Saves everything (routines, weekly plan, history and your photos) into one file. Share it to Google Drive, WhatsApp or Files. To restore, tap Restore and pick that file.', style: ts(12, c: P.mu)),
         const SizedBox(height: 12),
@@ -3832,7 +3987,7 @@ class _PP extends State<ProfilePage> {
       ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('Vytron Fit v1.6.2 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('Vytron Fit v1.6.3 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }

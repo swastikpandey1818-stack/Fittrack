@@ -1,3 +1,5 @@
+v1.6.3: Voice coach. A deep male voice speaks when rest starts, when rest ends and when exercises begin. On/off in Profile and in the workout screen.
+
 Vytron Fit v1.6.2: Play video button in a workout pauses the workout and rest timers, then resumes where you left off. New 'AI workout builder' in Profile: copy a prompt + your routines into ChatGPT, paste its reply back to add routines with video links (adds only, nothing is deleted). Restore is more tolerant of edited backup files.\n\nVytron Fit v1.6.1: fixes 'This video is unavailable' (YouTube error 152) in the in-app player by setting the player origin.
 
 Vytron Fit v1.6: videos play inside the app (YouTube embedded player with volume, no sign-up; switch in Profile). Exercise library: gold 'Already added' marking and an 'Already added' view where you attach your own link. Muscle groups and sections are not changed.
