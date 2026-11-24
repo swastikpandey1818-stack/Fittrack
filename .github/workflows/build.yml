@@ -33,6 +33,7 @@ jobs:
                     ext.buildTypes.release.minifyEnabled = false
                     ext.buildTypes.release.shrinkResources = false
                   } catch (Throwable t) { println 'minify off failed: ' + t }
+                  try { ext.defaultConfig.minSdk = 24 } catch (Throwable t) { println 'minSdk failed: ' + t }
                   try { ext.compileOptions.coreLibraryDesugaringEnabled = true } catch (Throwable t) { println 'desugar flag failed: ' + t }
                   p.dependencies.add('coreLibraryDesugaring', 'com.android.tools:desugar_jdk_libs:2.1.4')
                 }
@@ -45,16 +46,55 @@ jobs:
           [ -d android ] || flutter create --platforms=android --project-name fittrack --org com.fittrack .
           rm -rf test
           M=android/app/src/main/AndroidManifest.xml
-          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent><intent><action android:name="android.intent.action.TTS_SERVICE"/></intent></queries>\n    <application#' $M
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent><intent><action android:name="android.intent.action.TTS_SERVICE"/></intent><intent><action android:name="android.speech.RecognitionService"/></intent></queries>\n    <application#' $M
           sed -i 's#</application>#    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713"/>\n        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>\n        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/><action android:name="android.intent.action.MY_PACKAGE_REPLACED"/><action android:name="android.intent.action.QUICKBOOT_POWERON"/><action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/></intent-filter></receiver>\n    </application>#' $M
           cat $M
           sed -i 's/android:label="[^"]*"/android:label="Vytron Fit"/' android/app/src/main/AndroidManifest.xml
+          MA=$(find android/app/src/main -name 'MainActivity.kt' | head -1)
+          if [ -n "$MA" ]; then
+            PKG=$(grep -m1 '^package ' "$MA")
+            cat > "$MA" <<'KOTLIN'
+          PKGLINE
+
+          import android.view.KeyEvent
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private var keys: MethodChannel? = null
+              private var capture = false
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  keys = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "vytron/keys")
+                  keys?.setMethodCallHandler { call, result ->
+                      if (call.method == "capture") {
+                          capture = (call.arguments as? Boolean) ?: false
+                          result.success(null)
+                      } else {
+                          result.notImplemented()
+                      }
+                  }
+              }
+
+              override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+                  if (capture && keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                      if (event == null || event.repeatCount == 0) keys?.invokeMethod("volDown", null)
+                      return true
+                  }
+                  return super.onKeyDown(keyCode, event)
+              }
+          }
+          KOTLIN
+            sed -i "1s|.*|$PKG|" "$MA"
+          fi
           flutter pub get
           dart run flutter_launcher_icons
           flutter build apk --release --no-shrink --split-debug-info=build/symbols
       - uses: actions/upload-artifact@v4
         with:
-          name: fittrack-v1.6.2-apk
+          name: fittrack-v1.6.4-apk
           path: build/app/outputs/flutter-apk/app-release.apk
   smoke:
     needs: build
@@ -63,7 +103,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: fittrack-v1.6.2-apk
+          name: fittrack-v1.6.4-apk
           path: apks
       - name: Enable KVM
         run: |
