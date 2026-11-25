@@ -181,16 +181,13 @@ class Voice {
   }
 }
 
-// Listens for short spoken commands while a workout is open. Needs the microphone.
+// Tap-to-speak commands: a popup shows your words live (like keyboard voice typing).
 class Mic {
   static final SpeechToText _s = SpeechToText();
   static bool on = false;
-  static bool active = false;
   static bool _ready = false;
-  static DateTime _quietUntil = DateTime.fromMillisecondsSinceEpoch(0);
-  static void Function(String)? _onWords;
-  static Timer? _timer;
-  static final ValueNotifier<bool> hearing = ValueNotifier<bool>(false);
+  static String error = '';
+  static final ValueNotifier<String> status = ValueNotifier<String>('');
 
   static Future<void> load() async {
     on = (await DB.kv('mic')) == '1';
@@ -199,7 +196,6 @@ class Mic {
   static Future<void> setOn(bool v) async {
     on = v;
     await DB.setKv('mic', v ? '1' : '0');
-    if (!v) await _halt();
   }
 
   static Future<bool> check() => _init();
@@ -208,15 +204,10 @@ class Mic {
     if (_ready) return true;
     try {
       _ready = await _s.initialize(
-        onStatus: (st) {
-          if (st == 'done' || st == 'notListening') {
-            hearing.value = false;
-            _again();
-          }
-        },
+        onStatus: (st) => status.value = st,
         onError: (e) {
-          hearing.value = false;
-          _again(slow: true);
+          error = e.errorMsg;
+          status.value = 'error';
         },
       );
     } catch (_) {
@@ -225,76 +216,35 @@ class Mic {
     return _ready;
   }
 
-  static void begin(void Function(String) cb) {
-    _onWords = cb;
-    active = true;
-    _again(fast: true);
+  static Future<bool> listenOnce(void Function(String words, bool done) onText) async {
+    if (!await _init()) return false;
+    try {
+      await _s.cancel();
+    } catch (_) {}
+    error = '';
+    try {
+      // ignore: deprecated_member_use
+      await _s.listen(
+        onResult: (r) => onText(r.recognizedWords, r.finalResult),
+        listenFor: const Duration(seconds: 20),
+        pauseFor: const Duration(seconds: 3),
+        partialResults: true,
+        cancelOnError: true,
+      );
+    } catch (_) {
+      return false;
+    }
+    return true;
   }
 
-  static Future<void> end() async {
-    active = false;
-    _onWords = null;
-    await _halt();
-  }
-
-  static Future<void> _halt() async {
-    _timer?.cancel();
-    hearing.value = false;
+  static Future<void> cancel() async {
     try {
       await _s.cancel();
     } catch (_) {}
   }
 
-  static void speakingStart() {
-    _quietUntil = DateTime.now().add(const Duration(seconds: 60));
-    _timer?.cancel();
-    hearing.value = false;
-    try {
-      _s.cancel();
-    } catch (_) {}
-  }
-
-  static void speakingEnd() {
-    _quietUntil = DateTime.now().add(const Duration(milliseconds: 900));
-    _again();
-  }
-
-  static void _again({bool slow = false, bool fast = false}) {
-    _timer?.cancel();
-    if (!on || !active) return;
-    _timer = Timer(Duration(milliseconds: fast ? 200 : (slow ? 1500 : 500)), _listen);
-  }
-
-  static Future<void> _listen() async {
-    if (!on || !active) return;
-    final wait = _quietUntil.difference(DateTime.now()).inMilliseconds;
-    if (wait > 0) {
-      _timer = Timer(Duration(milliseconds: wait + 100), _listen);
-      return;
-    }
-    if (!await _init()) {
-      hearing.value = false;
-      return;
-    }
-    if (_s.isListening) return;
-    try {
-      hearing.value = true;
-      // ignore: deprecated_member_use
-      await _s.listen(
-        onResult: (r) {
-          if (r.finalResult && r.recognizedWords.trim().isNotEmpty) _onWords?.call(r.recognizedWords);
-        },
-        listenFor: const Duration(seconds: 40),
-        pauseFor: const Duration(seconds: 6),
-        localeId: 'en_US',
-        partialResults: false,
-        cancelOnError: false,
-      );
-    } catch (_) {
-      hearing.value = false;
-      _again(slow: true);
-    }
-  }
+  static void speakingStart() {}
+  static void speakingEnd() {}
 }
 
 // Volume-down button logs a set (needs the native hook added by the build workflow).
@@ -2370,7 +2320,7 @@ class _ShellState extends State<Shell> {
                   child: Stack(fit: StackFit.expand, children: [
                     Image.asset('${img}drawer_header.jpg', fit: BoxFit.cover),
                     Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, P.bg]))),
-                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6.4', style: ts(20, w: FontWeight.w900))),
+                    Positioned(left: 16, bottom: 12, child: Text('Vytron Fit v1.6.4.1', style: ts(20, w: FontWeight.w900))),
                   ]),
                 ),
                 item(context, Icons.home_rounded, 'Home', () => go(0)),
@@ -2805,7 +2755,6 @@ class _WS extends State<WorkoutPage> {
     DB.kv('rest').then((v) {
       if (v != null) rest = int.tryParse(v) ?? 60;
     });
-    if (Mic.on) Mic.begin(onHeard);
     if (Keys.on) {
       Keys.bind(() {
         if (mounted) autoLog();
@@ -2813,7 +2762,7 @@ class _WS extends State<WorkoutPage> {
     }
     if (exs.isNotEmpty) {
       Future.delayed(const Duration(milliseconds: 900), () {
-        if (mounted && exs.isNotEmpty) Voice.say('Let\'s go. First exercise: ${exs[0]}.${Mic.on ? ' Say complete when you finish a set.' : ''}');
+        if (mounted && exs.isNotEmpty) Voice.say('Let\'s go. First exercise: ${exs[0]}.${Mic.on ? ' Tap the mic and say complete when you finish a set.' : ''}');
       });
     }
     t = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -2894,7 +2843,7 @@ class _WS extends State<WorkoutPage> {
   void dispose() {
     t?.cancel();
     Voice.stop();
-    Mic.end();
+    Mic.cancel();
     Keys.unbind();
     kg.dispose();
     super.dispose();
@@ -2931,7 +2880,11 @@ class _WS extends State<WorkoutPage> {
   }
 
   void autoLog({int? n}) {
-    if (exs.isEmpty || paused || restLeft > 0) return;
+    if (exs.isEmpty || paused) return;
+    if (restLeft > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(duration: Duration(seconds: 2), content: Text('Rest is running. Say "skip rest" first.')));
+      return;
+    }
     final ex = exs[ei];
     final count = setsOf(ex).length + 1;
     if (isT(ex)) {
@@ -2978,7 +2931,20 @@ class _WS extends State<WorkoutPage> {
     } else if (has(['done', 'complete', 'completed', 'finished', 'finish set', 'log set', 'log it'])) {
       lastCmd = now;
       autoLog(n: repsFrom(w));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(duration: const Duration(seconds: 3), content: Text('Heard "$w". Try: complete, 12 reps complete, skip rest, next exercise, pause.')));
     }
+  }
+
+  Future<void> speak() async {
+    Voice.stop();
+    final words = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const SpeakSheet(),
+    );
+    if (words != null && words.trim().isNotEmpty && mounted) onHeard(words);
   }
 
   void pick(int i) {
@@ -3106,7 +3072,7 @@ class _WS extends State<WorkoutPage> {
       if (!mounted) return;
       final tot = logged.where((s) => s['kind'] != 'time').fold<int>(0, (a, s) => a + (s['reps'] as int));
       final held = logged.where((s) => s['kind'] == 'time').fold<int>(0, (a, s) => a + (s['reps'] as int));
-      Mic.end();
+      Mic.cancel();
       Keys.unbind();
       Voice.say('Workout complete. Good work.');
       await showDialog<void>(
@@ -3148,27 +3114,7 @@ class _WS extends State<WorkoutPage> {
           Row(children: [
             IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
             Expanded(child: Text(widget.name, style: ts(20, w: FontWeight.w800))),
-            IconButton(
-              tooltip: 'Voice commands',
-              onPressed: () async {
-                await Mic.setOn(!Mic.on);
-                if (Mic.on) {
-                  final ok = await Mic.check();
-                  if (ok) {
-                    Mic.begin(onHeard);
-                  } else {
-                    await Mic.setOn(false);
-                  }
-                } else {
-                  await Mic.end();
-                }
-                if (mounted) setState(() {});
-              },
-              icon: ValueListenableBuilder<bool>(
-                valueListenable: Mic.hearing,
-                builder: (_, h, __) => Icon(Mic.on ? Icons.mic_rounded : Icons.mic_off_rounded, color: (Mic.on && h) ? P.emerald : P.gold),
-              ),
-            ),
+            if (Mic.on) IconButton(tooltip: 'Speak a command', onPressed: speak, icon: const Icon(Icons.mic_rounded, color: P.gold)),
             IconButton(
               tooltip: 'Voice coach',
               onPressed: () async {
@@ -3368,7 +3314,8 @@ class _WS extends State<WorkoutPage> {
                 TextField(controller: kg, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: fld('Weight kg (optional)')),
                 const SizedBox(height: 12),
               ],
-              gbtn('Log set', logSet, i: Icons.check_rounded),
+              if (Mic.on) goldBtn('Speak a command', speak, i: Icons.mic_rounded),
+        gbtn('Log set', logSet, i: Icons.check_rounded),
             ])),
           if (restLeft > 0)
             card(Row(children: [
@@ -4278,7 +4225,7 @@ class _PP extends State<ProfilePage> {
             const SizedBox(width: 10),
             const Flexible(child: Text('Voice commands')),
           ]),
-          subtitle: Text('Say "complete" or "push-ups complete" to log a set. Add "12 reps" to set the count. Also: "skip rest", "next exercise", "pause", "resume". The microphone listens only while a workout is open. It cannot tell your voice from others.', style: ts(12, c: P.mu)),
+          subtitle: Text('Adds a Speak button in the workout. Tap it, say "complete", "12 reps complete", "skip rest", "next exercise" or "pause", and your words appear live. The microphone is used only while that popup is open. Needs Google speech services.', style: ts(12, c: P.mu)),
           value: micOn,
           onChanged: (v) async {
             setState(() => micOn = v);
@@ -4334,7 +4281,7 @@ class _PP extends State<ProfilePage> {
       ])),
       const ReminderCard(),
       const AdCodeCard(),
-      Text('Vytron Fit v1.6.4 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
+      Text('Vytron Fit v1.6.4.1 · all data is stored on this phone in a local SQLite database.', style: ts(12, c: P.mu), textAlign: TextAlign.center),
     ]);
   }
 }
@@ -5013,4 +4960,128 @@ class SweepPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(SweepPainter o) => o.t != t;
+}
+
+
+// ---------- tap-to-speak popup ----------
+class SpeakSheet extends StatefulWidget {
+  const SpeakSheet({super.key});
+  @override
+  State<SpeakSheet> createState() => _SS();
+}
+
+class _SS extends State<SpeakSheet> {
+  String words = '';
+  String note = 'Starting…';
+  bool finished = false;
+  bool failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Mic.status.addListener(onStatus);
+    start();
+  }
+
+  String friendly(String e) {
+    if (e.contains('no_match')) return 'I did not catch that. Tap Try again.';
+    if (e.contains('timeout')) return 'I did not hear anything. Tap Try again.';
+    if (e.contains('permission')) return 'Microphone permission is off. Allow it in phone Settings, then try again.';
+    if (e.contains('network')) return 'The speech service needs internet, or download offline English in Google speech settings.';
+    if (e.contains('busy')) return 'The speech service is busy. Wait a second and try again.';
+    return 'Speech error: $e';
+  }
+
+  void onStatus() {
+    if (!mounted || finished) return;
+    final st = Mic.status.value;
+    if (st == 'listening') {
+      setState(() {
+        note = 'Listening… speak now';
+        failed = false;
+      });
+    } else if (st == 'error') {
+      setState(() {
+        note = friendly(Mic.error);
+        failed = true;
+      });
+    } else if (st == 'done' || st == 'notListening') {
+      if (words.trim().isNotEmpty) {
+        finish();
+      } else if (!failed) {
+        setState(() {
+          note = 'I did not hear anything. Tap Try again.';
+          failed = true;
+        });
+      }
+    }
+  }
+
+  Future<void> start() async {
+    setState(() {
+      words = '';
+      note = 'Starting…';
+      failed = false;
+    });
+    final ok = await Mic.listenOnce((w, fin) {
+      if (!mounted || finished) return;
+      setState(() => words = w);
+      if (fin && w.trim().isNotEmpty) finish();
+    });
+    if (!ok && mounted) {
+      setState(() {
+        note = 'Speech recognition is not available. Allow the microphone and enable Google speech services.';
+        failed = true;
+      });
+    }
+  }
+
+  void finish() {
+    if (finished || !mounted) return;
+    finished = true;
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) Navigator.pop(context, words);
+    });
+  }
+
+  @override
+  void dispose() {
+    Mic.status.removeListener(onStatus);
+    Mic.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF0B2A1C), Color(0xFF050807)]),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: P.emerald.withOpacity(.6)),
+        boxShadow: [BoxShadow(color: P.emerald.withOpacity(.25), blurRadius: 30)],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 74,
+            height: 74,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: P.emerald, boxShadow: [BoxShadow(color: P.emerald.withOpacity(.5), blurRadius: failed ? 6 : 26, spreadRadius: failed ? 0 : 4)]),
+            child: Icon(failed ? Icons.mic_off_rounded : Icons.mic_rounded, size: 38, color: Colors.black),
+          ),
+          const SizedBox(height: 16),
+          Text(words.isEmpty ? note : words, textAlign: TextAlign.center, style: ts(words.isEmpty ? 15 : 24, w: words.isEmpty ? FontWeight.w600 : FontWeight.w800, c: words.isEmpty ? Colors.white70 : Colors.white)),
+          const SizedBox(height: 10),
+          Text('Try: "complete" · "12 reps complete" · "skip rest" · "next exercise" · "pause"', textAlign: TextAlign.center, style: ts(11, c: Colors.white38)),
+          const SizedBox(height: 14),
+          Row(children: [
+            Expanded(child: TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel'))),
+            if (failed) Expanded(child: goldBtn('Try again', start, i: Icons.refresh_rounded)),
+          ]),
+        ]),
+      ),
+    );
+  }
 }

@@ -1,3 +1,5 @@
+v1.6.4.1: Voice commands are now tap-to-speak. A green popup shows your words live; the command runs when you stop talking.
+
 v1.6.4: Voice commands (say complete / 12 reps / skip rest / next exercise / pause), volume-down button logs a set, female voice option, louder and smoother voice.
 
 v1.6.3: Voice coach. A deep male voice speaks when rest starts, when rest ends and when exercises begin. On/off in Profile and in the workout screen.

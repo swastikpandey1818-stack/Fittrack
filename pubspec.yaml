@@ -1,7 +1,7 @@
 name: fittrack
 description: Vytron Fit - pro workout tracker
 publish_to: 'none'
-version: 1.6.4+18
+version: 1.6.4+19
 environment:
   sdk: '>=3.0.0 <4.0.0'
 dependencies:
