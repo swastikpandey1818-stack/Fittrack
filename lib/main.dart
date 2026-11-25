@@ -4967,10 +4967,10 @@ class SweepPainter extends CustomPainter {
 class SpeakSheet extends StatefulWidget {
   const SpeakSheet({super.key});
   @override
-  State<SpeakSheet> createState() => _SS();
+  State<SpeakSheet> createState() => _SpeakState();
 }
 
-class _SS extends State<SpeakSheet> {
+class _SpeakState extends State<SpeakSheet> {
   String words = '';
   String note = 'Starting…';
   bool finished = false;
